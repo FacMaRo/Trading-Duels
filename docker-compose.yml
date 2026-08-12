@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-duels-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: trading_duels
+    ports:
+      - '5432:5432'
+    volumes:
+      - td_pg_data:/var/lib/postgresql/data
+
+volumes:
+  td_pg_data:

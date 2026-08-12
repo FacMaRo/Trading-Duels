@@ -1,0 +1,37 @@
+{
+  "name": "trading-duels",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plataforma de Duelos de Trading 1vs1",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev -w @trading-duels/api\" \"npm run dev -w @trading-duels/web\"",
+    "dev:api": "npm run dev -w @trading-duels/api",
+    "dev:web": "npm run dev -w @trading-duels/web",
+    "build": "npm run build -w @trading-duels/shared && npm run build -w @trading-duels/api && npm run build -w @trading-duels/web",
+    "build:shared": "npm run build -w @trading-duels/shared",
+    "db:generate": "npm run db:generate -w @trading-duels/api",
+    "db:migrate": "npm run db:migrate -w @trading-duels/api",
+    "db:push": "npm run db:push -w @trading-duels/api",
+    "db:studio": "npm run db:studio -w @trading-duels/api",
+    "lint": "npm run lint -w @trading-duels/web && npm run lint -w @trading-duels/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "@nestjs/core@10.4.22": true,
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "bcrypt@5.1.1": true,
+    "prisma@6.19.3": true,
+    "unrs-resolver@1.12.2": true
+  }
+}

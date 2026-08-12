@@ -1,0 +1,205 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /*
+     * Trading terminal — dark professional
+     * Base ~#0B0F14 · surfaces slightly lifted · blue accent only for primary CTA
+     * Green/red reserved for P&L outcomes
+     */
+    --background: 210 22% 6%;
+    --foreground: 210 20% 96%;
+
+    --card: 210 18% 9%;
+    --card-foreground: 210 20% 96%;
+
+    --popover: 210 18% 10%;
+    --popover-foreground: 210 20% 96%;
+
+    /* Professional blue (not neon) */
+    --primary: 207 78% 48%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 14% 13%;
+    --secondary-foreground: 210 16% 92%;
+
+    --muted: 210 12% 12%;
+    --muted-foreground: 215 12% 52%;
+
+    --accent: 210 14% 14%;
+    --accent-foreground: 210 20% 96%;
+
+    --destructive: 0 62% 48%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 55% 38%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 36 80% 48%;
+    --warning-foreground: 0 0% 100%;
+
+    --border: 210 12% 15%;
+    --input: 210 12% 15%;
+    --ring: 207 78% 48%;
+
+    --chart-up: 152 55% 42%;
+    --chart-down: 0 62% 52%;
+
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    min-height: 100vh;
+    /* Subtle depth only — no casino glow */
+    background-image: radial-gradient(
+      ellipse 90% 50% at 50% -30%,
+      hsl(207 78% 48% / 0.06),
+      transparent 55%
+    );
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.35);
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .glass {
+    @apply border-b border-border/80 bg-background/85 backdrop-blur-xl;
+  }
+
+  .panel {
+    @apply rounded-lg border border-border bg-card;
+  }
+
+  .surface {
+    @apply rounded-lg border border-border bg-card;
+  }
+
+  .surface-raised {
+    @apply rounded-lg border border-border bg-secondary/40;
+  }
+
+  .label-caps {
+    @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground;
+  }
+
+  .mono-num {
+    @apply font-mono tabular-nums tracking-tight;
+  }
+
+  .arena-grid {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    min-height: calc(100vh - 3.5rem);
+  }
+
+  .timer-urgent {
+    animation: timer-pulse 1.1s ease-in-out infinite;
+  }
+
+  .animate-result-pop {
+    animation: result-pop 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.22s ease-out both;
+  }
+
+  /* Soft highlight when your rank row is active */
+  .rank-row {
+    @apply transition-colors duration-300;
+  }
+  .rank-row-me {
+    @apply bg-primary/10 font-semibold;
+  }
+
+  /* Smooth queue / timer digit updates */
+  .count-tick {
+    @apply mono-num transition-[color,opacity] duration-200;
+  }
+
+  .trade-row-pulse {
+    animation: trade-pulse 0.7s ease-out 1;
+  }
+}
+
+@keyframes trade-pulse {
+  0% {
+    box-shadow: 0 0 0 0 hsl(207 78% 48% / 0.45);
+    background-color: hsl(207 78% 48% / 0.12);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    background-color: transparent;
+  }
+}
+
+@keyframes timer-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.78;
+  }
+}
+
+@keyframes result-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.88) translateY(18px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Arena: flat terminal background — no decorative gradients */
+body:has(.arena-root) {
+  background-image: none;
+  background-color: hsl(210 22% 5%);
+  overflow: hidden;
+}
+
+/* Arena layout helpers — denser, no browser zoom required */
+.arena-root {
+  /* Keep content inside viewport; side panels scroll internally */
+  box-sizing: border-box;
+}

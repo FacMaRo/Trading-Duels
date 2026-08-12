@@ -1,0 +1,797 @@
+// Trading Duels — schema PostgreSQL
+// Modelos de dominio: usuarios, wallet, duelos, trades, raises, matchmaking
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ─────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum DuelMode {
+  BLITZ
+  NORMAL
+  SLOW
+}
+
+enum DuelStatus {
+  WAITING
+  MATCHED
+  PREPARATION
+  DEVELOPMENT
+  SETTLING
+  COMPLETED
+  CANCELLED
+  DRAW
+}
+
+enum MatchType {
+  AUTO
+  OPEN_CHALLENGE
+  DIRECT
+}
+
+enum TradeSide {
+  LONG
+  SHORT
+}
+
+enum TradeStatus {
+  PENDING
+  OPEN
+  CLOSED
+  CANCELLED
+  EXPIRED
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+}
+
+enum RaiseStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  RE_RAISED
+  EXPIRED
+}
+
+enum WalletTxType {
+  DEPOSIT
+  WITHDRAWAL
+  DUEL_STAKE
+  DUEL_WIN
+  DUEL_REFUND
+  PLATFORM_FEE
+  ADJUSTMENT
+  MISSION_REWARD
+  SPECTATOR_BET_LOCK
+  SPECTATOR_BET_WIN
+  SPECTATOR_BET_REFUND
+  BR_STAKE
+  BR_WIN
+  BR_REFUND
+  /// Auditoría: entrada gratis Premium (monto 0, no bloquea saldo)
+  BR_FREE_ENTRY
+  /// Grant of non-withdrawable free-entry voucher (amount = face stake, balance unchanged)
+  FREE_ENTRY_CREDIT
+  /// Spend of free-entry voucher on real BR queue
+  FREE_ENTRY_USE
+}
+
+enum ReferralStatus {
+  PENDING
+  QUALIFIED
+  REWARDED
+}
+
+enum FreeEntryCreditStatus {
+  AVAILABLE
+  USED
+  EXPIRED
+  CANCELLED
+}
+
+enum FreeEntryCreditSource {
+  /// Referrer reward: free $5 entry
+  REFERRAL_REFERRER
+  /// Referred reward: free $1 entry
+  REFERRAL_REFERRED
+}
+
+enum BrMatchStatus {
+  QUEUE
+  COUNTDOWN
+  LIVE
+  SETTLING
+  COMPLETED
+  CANCELLED
+}
+
+enum BrPlayerStatus {
+  QUEUED
+  PLAYING
+  SETTLED
+  LEFT
+}
+
+enum SpectatorBetStatus {
+  OPEN
+  MATCHED
+  SETTLED
+  CANCELLED
+  REFUNDED
+}
+
+enum MissionType {
+  DAILY_WINS_6
+  WEEKLY_WINS_18
+  STREAK_5
+  MONTHLY_WINS_35
+}
+
+enum MissionProgressStatus {
+  IN_PROGRESS
+  COMPLETED
+  CLAIMED
+  LOCKED
+}
+
+enum WalletTxStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum SlowSession {
+  TOKYO
+  LONDON
+  NY
+}
+
+// ─── User & Auth ───────────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  username     String    @unique
+  displayName  String?
+  passwordHash String
+  role         UserRole  @default(USER)
+  avatarUrl    String?
+  elo          Int       @default(1000)
+  wins         Int       @default(0)
+  losses       Int       @default(0)
+  draws        Int       @default(0)
+  /// Plan Premium (9,99 €/mes) — flag local; sin pasarela aún
+  isPremium    Boolean   @default(false)
+  /// Guest demo (solo nickname, sin dinero real)
+  isDemoGuest  Boolean   @default(false)
+  /// System bot for DEMO matches only (never real-money)
+  isBot        Boolean   @default(false)
+  /// Unique share code for real-money referral program
+  referralCode String?   @unique
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  wallet              Wallet?
+  trades              Trade[]
+  raisesProposed      StakeRaise[]          @relation("RaiseFrom")
+  raisesReceived      StakeRaise[]          @relation("RaiseTo")
+  matchmakingTickets  MatchmakingTicket[]
+  openChallenges      OpenChallenge[]
+  duelAsPlayerA       Duel[]                @relation("PlayerA")
+  duelAsPlayerB       Duel[]                @relation("PlayerB")
+  duelsWon            Duel[]                @relation("Winner")
+  sessions            Session[]
+  missionProgress     UserMissionProgress[]
+  missionClaims       MissionClaim[]
+  missionWinEvents    MissionWinEvent[]
+  spectatorBetsProposed SpectatorBet[] @relation("BetProposer")
+  spectatorBetsAccepted SpectatorBet[] @relation("BetAcceptor")
+  brMatchPlayers        BrMatchPlayer[]
+  brTrades              BrTrade[]
+  brChatMessages        BrChatMessage[]
+  premiumFreeEntryUses  PremiumFreeEntryUse[]
+  referralsGiven        Referral[]            @relation("ReferralsGiven")
+  referralReceived      Referral?             @relation("ReferralReceived")
+  freeEntryCredits      FreeEntryCredit[]
+
+  @@index([elo])
+  @@index([username])
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  userAgent String?
+  ip        String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ─── Wallet / Economía ─────────────────────────────────────────────────────
+
+model Wallet {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  /// Balance disponible (USD)
+  balance       Decimal  @default(0) @db.Decimal(18, 2)
+  /// Fondos bloqueados en duelos activos
+  lockedBalance Decimal  @default(0) @db.Decimal(18, 2)
+  currency      String   @default("USD")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id          String          @id @default(cuid())
+  walletId    String
+  type        WalletTxType
+  status      WalletTxStatus  @default(PENDING)
+  amount      Decimal         @db.Decimal(18, 2)
+  /// Balance después de la operación (si COMPLETED)
+  balanceAfter Decimal?       @db.Decimal(18, 2)
+  duelId      String?
+  description String?
+  metadata    Json?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  duel   Duel?  @relation(fields: [duelId], references: [id], onDelete: SetNull)
+
+  @@index([walletId, createdAt])
+  @@index([duelId])
+  @@index([type, status])
+  @@map("wallet_transactions")
+}
+
+// ─── Duelos ────────────────────────────────────────────────────────────────
+
+model Duel {
+  id              String        @id @default(cuid())
+  mode            DuelMode
+  status          DuelStatus    @default(WAITING)
+  matchType       MatchType     @default(AUTO)
+  sessionWindow   SlowSession?
+
+  playerAId       String
+  playerBId       String?
+
+  /// Stake actual de cada jugador (puede subir)
+  stakeA          Decimal       @db.Decimal(18, 2)
+  stakeB          Decimal       @default(0) @db.Decimal(18, 2)
+
+  /// Pot = stakeA + stakeB (se actualiza con raises)
+  pot             Decimal       @default(0) @db.Decimal(18, 2)
+  platformFee     Decimal       @default(0) @db.Decimal(18, 2)
+  winnerPrize     Decimal       @default(0) @db.Decimal(18, 2)
+
+  winnerId        String?
+
+  /// Capital virtual idéntico para ambos
+  virtualCapital  Decimal       @default(100000) @db.Decimal(18, 2)
+
+  /// Activo del duelo (desafíos abiertos). Si null, multi-activo libre.
+  primaryAsset    String?
+
+  /// Scores finales
+  totalRA         Decimal?      @db.Decimal(12, 4)
+  totalRB         Decimal?      @db.Decimal(12, 4)
+  totalPnlA       Decimal?      @db.Decimal(18, 2)
+  totalPnlB       Decimal?      @db.Decimal(18, 2)
+
+  /// ELO snapshot al match (oculto en open challenge hasta accept)
+  eloA            Int?
+  eloB            Int?
+
+  /// Contadores de subidas por jugador
+  raisesUsedA     Int           @default(0)
+  raisesUsedB     Int           @default(0)
+
+  playerAReady    Boolean       @default(false)
+  playerBReady    Boolean       @default(false)
+
+  /// Timers de fase
+  matchedAt       DateTime?
+  prepStartedAt   DateTime?
+  prepEndsAt      DateTime?
+  developStartedAt DateTime?
+  developEndsAt   DateTime?
+  settledAt       DateTime?
+  completedAt     DateTime?
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  playerA         User          @relation("PlayerA", fields: [playerAId], references: [id])
+  playerB         User?         @relation("PlayerB", fields: [playerBId], references: [id])
+  winner          User?         @relation("Winner", fields: [winnerId], references: [id])
+
+  trades          Trade[]
+  raises          StakeRaise[]
+  walletTxs       WalletTransaction[]
+  openChallenge   OpenChallenge?
+  spectatorBets   SpectatorBet[]
+
+  @@index([status])
+  @@index([playerAId])
+  @@index([playerBId])
+  @@index([mode, status])
+  @@index([createdAt])
+  @@map("duels")
+}
+
+// ─── Trades ────────────────────────────────────────────────────────────────
+
+model Trade {
+  id            String      @id @default(cuid())
+  duelId        String
+  userId        String
+
+  asset         String
+  side          TradeSide
+  orderType     OrderType
+  status        TradeStatus @default(PENDING)
+
+  /// Precio de entrada (null mientras limit no activa)
+  entryPrice    Decimal?    @db.Decimal(18, 8)
+  exitPrice     Decimal?    @db.Decimal(18, 8)
+  stopLoss      Decimal     @db.Decimal(18, 8)
+  takeProfit    Decimal?    @db.Decimal(18, 8)
+
+  /// % de riesgo sobre capital virtual
+  riskPct       Decimal     @db.Decimal(8, 4)
+  riskAmount    Decimal     @db.Decimal(18, 2)
+
+  /// Resultado
+  rMultiple     Decimal?    @db.Decimal(12, 4)
+  pnl           Decimal?    @db.Decimal(18, 2)
+
+  closeReason   String?     // SL | TP | MARKET | TIME | EXPIRED
+
+  chartTimeframe String?    // preferencia del jugador al abrir
+
+  openedAt      DateTime?
+  closedAt      DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  duel          Duel        @relation(fields: [duelId], references: [id], onDelete: Cascade)
+  user          User        @relation(fields: [userId], references: [id])
+
+  @@index([duelId, userId])
+  @@index([duelId, status])
+  @@index([userId])
+  @@map("trades")
+}
+
+// ─── Subida de apuestas ────────────────────────────────────────────────────
+
+model StakeRaise {
+  id              String      @id @default(cuid())
+  duelId          String
+  fromUserId      String
+  toUserId        String
+  previousStake   Decimal     @db.Decimal(18, 2)
+  proposedStake   Decimal     @db.Decimal(18, 2)
+  status          RaiseStatus @default(PENDING)
+  /// Si es respuesta RE_RAISE, apunta al raise anterior
+  parentRaiseId   String?
+  expiresAt       DateTime
+  respondedAt     DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  duel            Duel        @relation(fields: [duelId], references: [id], onDelete: Cascade)
+  fromUser        User        @relation("RaiseFrom", fields: [fromUserId], references: [id])
+  toUser          User        @relation("RaiseTo", fields: [toUserId], references: [id])
+  parentRaise     StakeRaise? @relation("RaiseChain", fields: [parentRaiseId], references: [id])
+  childRaises     StakeRaise[] @relation("RaiseChain")
+
+  @@index([duelId, status])
+  @@index([expiresAt])
+  @@map("stake_raises")
+}
+
+// ─── Matchmaking ───────────────────────────────────────────────────────────
+
+model MatchmakingTicket {
+  id            String        @id @default(cuid())
+  userId        String
+  mode          DuelMode
+  stake         Decimal       @db.Decimal(18, 2)
+  /// Activo del duelo (match solo entre tickets del mismo asset)
+  asset         String        @default("EURUSD")
+  elo           Int
+  sessionWindow SlowSession?
+  /// Rango ELO expandido con el tiempo (matchmaking suave)
+  eloRange      Int           @default(200)
+  status        String        @default("QUEUED") // QUEUED | MATCHED | CANCELLED | EXPIRED
+  matchedDuelId String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  expiresAt     DateTime?
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, mode, stake, asset])
+  @@index([userId, status])
+  @@map("matchmaking_tickets")
+}
+
+model OpenChallenge {
+  id            String        @id @default(cuid())
+  creatorId     String
+  mode          DuelMode
+  /// Par/activo del desafío (obligatorio)
+  asset         String
+  stake         Decimal       @db.Decimal(18, 2)
+  sessionWindow SlowSession?
+  status        String        @default("OPEN") // OPEN | ACCEPTED | CANCELLED | EXPIRED
+  duelId        String?       @unique
+  /// ELO del creador NO se expone hasta accept
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  expiresAt     DateTime?
+
+  creator       User          @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  duel          Duel?         @relation(fields: [duelId], references: [id], onDelete: SetNull)
+
+  @@index([status, mode])
+  @@index([status, asset])
+  @@index([creatorId])
+  @@map("open_challenges")
+}
+
+// ─── Apuestas P2P de espectadores ──────────────────────────────────────────
+
+/// Apuesta peer-to-peer entre espectadores sobre el ganador del duelo.
+/// La plataforma no asume riesgo: solo comisiona el 10% del pot matcheado.
+model SpectatorBet {
+  id          String             @id @default(cuid())
+  duelId      String
+  proposerId  String
+  acceptorId  String?
+  /// Jugador del duelo por el que apuesta el proponente (playerA o playerB id)
+  pickUserId  String
+  /// Monto que cada lado arriesga
+  amount      Decimal            @db.Decimal(18, 2)
+  pot         Decimal?           @db.Decimal(18, 2)
+  platformFee Decimal?           @db.Decimal(18, 2)
+  winnerPrize Decimal?           @db.Decimal(18, 2)
+  status      SpectatorBetStatus @default(OPEN)
+  /// Espectador que gana la apuesta (proposer o acceptor), no el jugador del duelo
+  winnerSpectatorId String?
+  matchedAt   DateTime?
+  settledAt   DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  duel     Duel  @relation(fields: [duelId], references: [id], onDelete: Cascade)
+  proposer User  @relation("BetProposer", fields: [proposerId], references: [id])
+  acceptor User? @relation("BetAcceptor", fields: [acceptorId], references: [id])
+
+  @@index([duelId, status])
+  @@index([proposerId])
+  @@index([acceptorId])
+  @@map("spectator_bets")
+}
+
+// ─── Battle Royale ─────────────────────────────────────────────────────────
+
+model BrMatch {
+  id                 String        @id @default(cuid())
+  status             BrMatchStatus @default(QUEUE)
+  asset              String
+  stake              Decimal       @db.Decimal(18, 2)
+  /// Partida DEMO (sin dinero, colas separadas del real)
+  isDemo             Boolean       @default(false)
+  maxPlayers         Int           @default(50)
+  minPlayers         Int           @default(20)
+  durationSeconds    Int           @default(600)
+  countdownSeconds   Int           @default(60)
+  playerCount        Int           @default(0)
+  pot                Decimal       @default(0) @db.Decimal(18, 2)
+  platformFee        Decimal       @default(0) @db.Decimal(18, 2)
+  prizePool          Decimal       @default(0) @db.Decimal(18, 2)
+  countdownStartedAt DateTime?
+  countdownEndsAt    DateTime?
+  liveStartedAt      DateTime?
+  liveEndsAt         DateTime?
+  settledAt          DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  players  BrMatchPlayer[]
+  trades   BrTrade[]
+  messages BrChatMessage[]
+
+  @@index([status, asset, stake, isDemo])
+  @@index([status, isDemo])
+  @@map("br_matches")
+}
+
+model BrMatchPlayer {
+  id                 String         @id @default(cuid())
+  matchId            String
+  userId             String
+  username           String
+  /// Snapshot de Premium al unirse (prioridad de cola)
+  isPremium          Boolean        @default(false)
+  /// Demo bot seat (never real-money wallets)
+  isBot              Boolean        @default(false)
+  /// Free entry (Premium weekly or referral credit) — no wallet lock
+  usedFreeEntry      Boolean        @default(false)
+  /// If set, this seat spent a FreeEntryCredit voucher (not Premium weekly)
+  freeEntryCreditId  String?
+  stake              Decimal        @db.Decimal(18, 2)
+  virtualCapital     Decimal        @default(10000) @db.Decimal(18, 2)
+  totalPnl           Decimal        @default(0) @db.Decimal(18, 2)
+  tradeCount         Int            @default(0)
+  totalRiskUsedPct   Decimal        @default(0) @db.Decimal(8, 4)
+  openTrades         Int            @default(0)
+  rank               Int?
+  prizeAmount        Decimal?       @db.Decimal(18, 2)
+  status             BrPlayerStatus @default(QUEUED)
+  joinedAt           DateTime       @default(now())
+  leftAt             DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  match BrMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  user  User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trades BrTrade[]
+
+  @@unique([matchId, userId])
+  @@index([userId, status])
+  @@index([matchId, totalPnl])
+  @@index([matchId, isPremium])
+  @@index([matchId, isBot])
+  @@map("br_match_players")
+}
+
+/**
+ * Uso de entrada gratis semanal Premium (1 por semana UTC ISO).
+ * weekKey formato: "2026-W12" (ISO week, UTC).
+ * Separate from referral FreeEntryCredit vouchers.
+ */
+model PremiumFreeEntryUse {
+  id        String   @id @default(cuid())
+  userId    String
+  weekKey   String
+  matchId   String?
+  playerId  String?
+  stake     Decimal  @default(1) @db.Decimal(18, 2)
+  usedAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, weekKey])
+  @@index([userId])
+  @@map("premium_free_entry_uses")
+}
+
+/**
+ * Real-money referral: referred signs up with code; qualifies after 1 real BR match.
+ * Rewards are FreeEntryCredit vouchers (not withdrawable cash).
+ */
+model Referral {
+  id                 String         @id @default(cuid())
+  referrerId         String
+  referredId         String         @unique
+  status             ReferralStatus @default(PENDING)
+  qualifyingMatchId  String?
+  qualifiedAt        DateTime?
+  rewardedAt         DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  referrer User              @relation("ReferralsGiven", fields: [referrerId], references: [id], onDelete: Cascade)
+  referred User              @relation("ReferralReceived", fields: [referredId], references: [id], onDelete: Cascade)
+  credits  FreeEntryCredit[]
+
+  @@index([referrerId, status])
+  @@index([status])
+  @@map("referrals")
+}
+
+/**
+ * Non-withdrawable free-entry vouchers for real BR queues only.
+ * Face stake must match lobby stake when spent.
+ */
+model FreeEntryCredit {
+  id          String                 @id @default(cuid())
+  userId      String
+  stake       Decimal                @db.Decimal(18, 2)
+  source      FreeEntryCreditSource
+  status      FreeEntryCreditStatus  @default(AVAILABLE)
+  referralId  String?
+  usedMatchId String?
+  usedPlayerId String?
+  /// Optional expiry; null = no expiry (MVP default may set 30d)
+  expiresAt   DateTime?
+  createdAt   DateTime               @default(now())
+  usedAt      DateTime?
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  referral Referral? @relation(fields: [referralId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, stake])
+  @@index([referralId])
+  @@map("free_entry_credits")
+}
+
+/// Chat de partida BR — todos leen; solo Premium escribe
+model BrChatMessage {
+  id        String   @id @default(cuid())
+  matchId   String
+  userId    String
+  username  String
+  isPremium Boolean  @default(false)
+  body      String
+  createdAt DateTime @default(now())
+
+  match BrMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  user  User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([matchId, createdAt])
+  @@map("br_chat_messages")
+}
+
+model BrTrade {
+  id           String      @id @default(cuid())
+  matchId      String
+  playerId     String
+  userId       String
+  asset        String
+  side         TradeSide
+  orderType    OrderType   @default(MARKET)
+  status       TradeStatus @default(PENDING)
+  entryPrice   Decimal?    @db.Decimal(18, 8)
+  exitPrice    Decimal?    @db.Decimal(18, 8)
+  stopLoss     Decimal     @db.Decimal(18, 8)
+  takeProfit   Decimal?    @db.Decimal(18, 8)
+  riskPct      Decimal     @db.Decimal(8, 4)
+  riskAmount   Decimal     @db.Decimal(18, 2)
+  rMultiple    Decimal?    @db.Decimal(12, 4)
+  pnl          Decimal?    @db.Decimal(18, 2)
+  closeReason  String?
+  openedAt     DateTime?
+  closedAt     DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  match  BrMatch       @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player BrMatchPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  user   User          @relation(fields: [userId], references: [id])
+
+  @@index([matchId, userId])
+  @@index([matchId, status])
+  @@index([playerId])
+  @@map("br_trades")
+}
+
+// ─── Cotizaciones (caché opcional para histórico MVP) ──────────────────────
+
+model PriceSnapshot {
+  id        String   @id @default(cuid())
+  asset     String
+  bid       Decimal  @db.Decimal(18, 8)
+  ask       Decimal  @db.Decimal(18, 8)
+  mid       Decimal  @db.Decimal(18, 8)
+  source    String   @default("mock")
+  ts        DateTime @default(now())
+
+  @@index([asset, ts])
+  @@map("price_snapshots")
+}
+
+// ─── Misiones ──────────────────────────────────────────────────────────────
+
+/// Pozo global alimentado con 10% de las comisiones de plataforma
+model MissionPool {
+  id          String   @id @default("main")
+  balance     Decimal  @default(0) @db.Decimal(18, 2)
+  lifetimeIn  Decimal  @default(0) @db.Decimal(18, 2)
+  lifetimeOut Decimal  @default(0) @db.Decimal(18, 2)
+  updatedAt   DateTime @updatedAt
+
+  @@map("mission_pool")
+}
+
+/// Tope diario global de recompensas de misiones pequeñas (UTC)
+model MissionDailyBudget {
+  /// YYYY-MM-DD (UTC)
+  dateKey   String   @id
+  paidOut   Decimal  @default(0) @db.Decimal(18, 2)
+  cap       Decimal  @default(300) @db.Decimal(18, 2)
+  updatedAt DateTime @updatedAt
+
+  @@map("mission_daily_budgets")
+}
+
+/// Progreso por usuario / tipo / período
+model UserMissionProgress {
+  id           String                @id @default(cuid())
+  userId       String
+  missionType  MissionType
+  /// day: YYYY-MM-DD | week: YYYY-Www | month: YYYY-MM | streak: "active"
+  periodKey    String
+  progress     Int                   @default(0)
+  target       Int
+  status       MissionProgressStatus @default(IN_PROGRESS)
+  rewardAmount Decimal?              @db.Decimal(18, 2)
+  completedAt  DateTime?
+  claimedAt    DateTime?
+  /// lastClaimedAt, cooldownUntil, etc.
+  metadata     Json?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  claims MissionClaim[]
+
+  @@unique([userId, missionType, periodKey])
+  @@index([userId, status])
+  @@index([missionType, periodKey])
+  @@map("user_mission_progress")
+}
+
+model MissionClaim {
+  id          String      @id @default(cuid())
+  userId      String
+  progressId  String
+  missionType MissionType
+  amount      Decimal     @db.Decimal(18, 2)
+  /// SMALL_BUDGET | POOL
+  source      String
+  createdAt   DateTime    @default(now())
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  progress UserMissionProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([progressId])
+  @@map("mission_claims")
+}
+
+/// Victorias contadas (idempotencia por duelo)
+model MissionWinEvent {
+  id     String   @id @default(cuid())
+  userId String
+  duelId String
+  stake  Decimal  @db.Decimal(18, 2)
+  wonAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, duelId])
+  @@index([userId, wonAt])
+  @@map("mission_win_events")
+}
