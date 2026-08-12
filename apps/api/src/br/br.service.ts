@@ -79,6 +79,12 @@ export type BrEmitter = (
 
 export type BrLobbyEmitter = (event: string, payload: unknown) => void;
 
+export type BrUserEmitter = (
+  userId: string,
+  event: string,
+  payload: unknown,
+) => void;
+
 @Injectable()
 export class BrService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BrService.name);
@@ -86,6 +92,7 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
   private priceUnsub: (() => void) | null = null;
   private emit: BrEmitter = () => {};
   private emitLobby: BrLobbyEmitter = () => {};
+  private emitUser: BrUserEmitter = () => {};
   /** Demo queues currently receiving staggered bot fills */
   private readonly demoFillInProgress = new Set<string>();
 
@@ -96,9 +103,14 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     private readonly referrals: ReferralsService,
   ) {}
 
-  setEmitters(match: BrEmitter, lobby: BrLobbyEmitter) {
+  setEmitters(
+    match: BrEmitter,
+    lobby: BrLobbyEmitter,
+    user?: BrUserEmitter,
+  ) {
     this.emit = match;
     this.emitLobby = lobby;
+    if (user) this.emitUser = user;
   }
 
   onModuleInit() {
@@ -1545,8 +1557,29 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
       match.status === BrMatchStatus.QUEUE ||
       match.status === BrMatchStatus.COUNTDOWN
     ) {
-      this.emitLobby('br:queue_update', await this.toPublicQueue(matchId));
-      this.emit(matchId, 'br:queue', await this.toQueueSnapshot(matchId));
+      const pub = await this.toPublicQueue(matchId);
+      const queueSnap = await this.toQueueSnapshot(matchId);
+      // Lobby-wide (all connected clients on /br)
+      this.emitLobby('br:queue_update', pub);
+      // Match room (if anyone subscribed)
+      this.emit(matchId, 'br:queue', queueSnap);
+      // Fan-out to each human in queue so demo counter updates even if
+      // the client never joined br:{matchId}
+      const humans = await this.prisma.brMatchPlayer.findMany({
+        where: {
+          matchId,
+          isBot: false,
+          status: BrPlayerStatus.QUEUED,
+        },
+        select: { userId: true },
+      });
+      for (const h of humans) {
+        this.emitUser(h.userId, 'br:queue_update', pub);
+        this.emitUser(h.userId, 'br:queue', {
+          ...queueSnap,
+          me: { userId: h.userId, inQueue: true },
+        });
+      }
     } else {
       this.emit(matchId, 'br:state', await this.toMatchSnapshot(matchId));
     }

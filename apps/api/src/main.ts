@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { getCorsOrigins } from './common/cors-origins';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -17,15 +18,20 @@ async function bootstrap() {
     }),
   );
 
-  const origin = config.get<string>('CORS_ORIGIN', 'http://localhost:3000');
+  const origins = getCorsOrigins();
   app.enableCors({
-    origin: origin.split(',').map((o) => o.trim()),
+    origin: origins,
     credentials: true,
   });
 
-  const port = config.get<number>('API_PORT', 3001);
-  await app.listen(port);
-  console.log(`🚀 Trading Duels API → http://localhost:${port}/api`);
+  // Railway sets PORT; fall back to API_PORT / 3001 for local
+  const port =
+    Number(process.env.PORT) ||
+    config.get<number>('API_PORT') ||
+    3001;
+  await app.listen(port, '0.0.0.0');
+  console.log(`🚀 Trading Duels API → http://0.0.0.0:${port}/api`);
+  console.log(`   CORS origins: ${origins.join(', ')}`);
 }
 
 bootstrap();

@@ -14,6 +14,7 @@ import type { JwtPayload } from '@trading-duels/shared';
 import { ALL_ASSETS, type AssetSymbol } from '@trading-duels/shared';
 import { BrService } from './br.service';
 import { MarketService } from '../market/market.service';
+import { getCorsOrigins } from '../common/cors-origins';
 
 type AppSocket = Socket & {
   data: {
@@ -23,11 +24,13 @@ type AppSocket = Socket & {
 };
 
 @WebSocketGateway({
+  path: '/socket.io',
   cors: {
-    origin: process.env.CORS_ORIGIN?.split(',') ?? ['http://localhost:3000'],
+    origin: getCorsOrigins(),
     credentials: true,
   },
   namespace: '/br',
+  transports: ['websocket', 'polling'],
 })
 export class BrGateway implements OnGatewayInit, OnGatewayConnection {
   @WebSocketServer()
@@ -47,6 +50,7 @@ export class BrGateway implements OnGatewayInit, OnGatewayConnection {
         this.server.to(`br:${matchId}`).emit(event, payload);
       },
       (event, payload) => {
+        // Namespace-wide (demo/real queue lobby updates)
         this.server.emit(event, payload);
         // Also user-specific start
         if (
@@ -58,6 +62,9 @@ export class BrGateway implements OnGatewayInit, OnGatewayConnection {
           const p = payload as { userId: string; matchId: string };
           this.server.to(`user:${p.userId}`).emit('br:you_started', p);
         }
+      },
+      (userId, event, payload) => {
+        this.server.to(`user:${userId}`).emit(event, payload);
       },
     );
 
@@ -71,7 +78,9 @@ export class BrGateway implements OnGatewayInit, OnGatewayConnection {
       });
     });
 
-    this.logger.log('BrGateway initialized');
+    this.logger.log(
+      `BrGateway initialized · CORS ${getCorsOrigins().join(', ')}`,
+    );
   }
 
   async handleConnection(client: AppSocket) {
@@ -80,10 +89,14 @@ export class BrGateway implements OnGatewayInit, OnGatewayConnection {
       const token =
         (client.handshake.auth?.token as string) ||
         (client.handshake.headers.authorization?.replace('Bearer ', '') ?? '');
-      if (!token) return;
+      if (!token) {
+        this.logger.debug(`WS guest connected ${client.id}`);
+        return;
+      }
       const payload = await this.jwt.verifyAsync<JwtPayload>(token);
       client.data.user = payload;
       await client.join(`user:${payload.sub}`);
+      this.logger.debug(`WS user ${payload.username} → user:${payload.sub}`);
     } catch {
       /* guest ok for prices */
     }

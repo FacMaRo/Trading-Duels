@@ -1,4 +1,22 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+/** Public API origin (no trailing slash, no /api). Baked in at build time. */
+function resolveApiBase(): string {
+  let url = (process.env.NEXT_PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
+  if (url.endsWith('/api')) url = url.slice(0, -4);
+  if (!url) {
+    if (typeof window !== 'undefined') {
+      const host = window.location.hostname;
+      if (host !== 'localhost' && host !== '127.0.0.1') {
+        console.error(
+          '[api] NEXT_PUBLIC_API_URL is missing. Set it on the WEB service and rebuild.',
+        );
+      }
+    }
+    return 'http://localhost:3001';
+  }
+  return url;
+}
+
+const API_URL = resolveApiBase();
 
 export class ApiError extends Error {
   constructor(

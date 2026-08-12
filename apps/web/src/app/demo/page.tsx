@@ -59,28 +59,80 @@ export default function DemoPage() {
       .catch(() => {});
   }, [user, router]);
 
+  // Live queue updates via Socket.IO
   useEffect(() => {
     if (!user) return;
     const socket = ensureBrSocketConnected();
     const onYou = (p: { matchId: string }) => {
-      router.push(`/br/${p.matchId}`);
+      if (p?.matchId) router.push(`/br/${p.matchId}`);
     };
     const onQ = (snap: BrQueueSnapshot) => {
-      if (snap.isDemo) {
-        setQueue((prev) =>
-          prev && prev.matchId === snap.matchId ? snap : prev,
-        );
-      }
+      if (!snap?.matchId) return;
+      setQueue((prev) => {
+        // Prefer updates for our current queue match
+        if (prev && prev.matchId === snap.matchId) {
+          return {
+            ...prev,
+            ...snap,
+            phase: 'queue',
+            isDemo: snap.isDemo ?? prev.isDemo ?? true,
+          };
+        }
+        // Accept first demo snapshot if we are waiting without local state
+        if (!prev && (snap.isDemo || snap.demoBotsEnabled)) {
+          return { ...snap, phase: 'queue' as const };
+        }
+        return prev;
+      });
+    };
+    const onStarted = (p: { matchId: string; userId?: string }) => {
+      if (p?.userId && p.userId !== user.id) return;
+      if (p?.matchId) router.push(`/br/${p.matchId}`);
     };
     socket.on('br:you_started', onYou);
+    socket.on('br:match_started', onStarted);
     socket.on('br:queue_update', onQ);
     socket.on('br:queue', onQ);
     return () => {
       socket.off('br:you_started', onYou);
+      socket.off('br:match_started', onStarted);
       socket.off('br:queue_update', onQ);
       socket.off('br:queue', onQ);
     };
   }, [user, router]);
+
+  // Polling fallback while finding match (if WS is down / flaky in production)
+  useEffect(() => {
+    if (step !== 'queue' || !user) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const snap = await brApi.me();
+        if (cancelled || !snap) return;
+        if (snap.phase === 'queue') {
+          setQueue((prev) => {
+            if (prev && prev.matchId !== snap.matchId) return prev;
+            return snap;
+          });
+        } else if (
+          snap.phase === 'match' &&
+          (snap.status === 'LIVE' ||
+            snap.status === 'SETTLING' ||
+            snap.status === 'COUNTDOWN')
+        ) {
+          router.push(`/br/${snap.matchId}`);
+        }
+      } catch {
+        /* ignore transient poll errors */
+      }
+    };
+    void tick();
+    const id = setInterval(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [step, user, router]);
 
   async function submitNick() {
     setError('');
@@ -100,6 +152,8 @@ export default function DemoPage() {
     setBusy(true);
     try {
       if (!user) await startDemo(nickname || 'Trader');
+      // Ensure WS is up before bots start filling so we receive br:queue_update
+      ensureBrSocketConnected();
       const snap = await brApi.joinDemoQueue({ asset });
       setQueue(snap);
       setStep('queue');
