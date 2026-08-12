@@ -47,15 +47,21 @@ export async function api<T>(
   const token = getToken();
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
+    Accept: 'application/json',
     ...(options.headers || {}),
   };
   if (token) {
     (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
   }
 
+  // Auth uses Bearer token in localStorage — no cookies.
+  // credentials:'omit' avoids CORS credential preflight edge cases on Railway.
   const res = await fetch(`${API_URL}/api${path}`, {
     ...options,
+    method: options.method || 'GET',
     headers,
+    credentials: 'omit',
+    mode: 'cors',
   });
 
   const text = await res.text();

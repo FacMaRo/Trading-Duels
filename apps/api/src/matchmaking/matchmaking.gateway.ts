@@ -22,16 +22,7 @@ type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents> & {
 
 @WebSocketGateway({
   cors: {
-    // Keep in sync with apps/api/src/common/cors-origins.ts (HTTP + BrGateway)
-    origin: (
-      process.env.CORS_ORIGIN?.split(',')
-        .map((o) => o.trim().replace(/\/+$/, ''))
-        .filter(Boolean) ?? []
-    ).concat([
-      'http://localhost:3000',
-      'http://127.0.0.1:3000',
-      'https://web-production-38a05.up.railway.app',
-    ]),
+    origin: true,
     credentials: true,
   },
   namespace: '/matchmaking',

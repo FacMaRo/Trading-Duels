@@ -87,7 +87,8 @@ export function getBrSocket(): Socket {
     brSocket = io(`${base}/br`, {
       path: '/socket.io',
       transports: ['websocket', 'polling'],
-      withCredentials: true,
+      // JWT via handshake.auth — no cookies needed
+      withCredentials: false,
       autoConnect: false,
       reconnection: true,
       reconnectionAttempts: Infinity,
