@@ -14,7 +14,7 @@ import type { JwtPayload } from '@trading-duels/shared';
 import { ALL_ASSETS, type AssetSymbol } from '@trading-duels/shared';
 import { BrService } from './br.service';
 import { MarketService } from '../market/market.service';
-import { getCorsOrigins } from '../common/cors-origins';
+import { getCorsOrigins, getSocketCorsOptions } from '../common/cors-origins';
 
 type AppSocket = Socket & {
   data: {
@@ -25,10 +25,8 @@ type AppSocket = Socket & {
 
 @WebSocketGateway({
   path: '/socket.io',
-  cors: {
-    origin: getCorsOrigins(),
-    credentials: true,
-  },
+  // Same origin rules as HTTP (callback, not a frozen import-time list)
+  cors: getSocketCorsOptions(),
   namespace: '/br',
   transports: ['websocket', 'polling'],
 })
