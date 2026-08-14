@@ -92,10 +92,11 @@ export default function BrArenaPage() {
       durationMs?: number,
     ) => {
       const tid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      // Max 3 visible — drop oldest
-      setToasts((prev) =>
-        [...prev, { id: tid, message, tone, durationMs }].slice(-3),
-      );
+      // Hard max 3: FIFO — drop oldest when a 4th arrives
+      setToasts((prev) => {
+        const next = [...prev, { id: tid, message, tone, durationMs }];
+        return next.length > 3 ? next.slice(next.length - 3) : next;
+      });
     },
     [],
   );
@@ -1846,7 +1847,7 @@ export default function BrArenaPage() {
 
       <ToastStack
         toasts={toasts}
-        position="top-right"
+        position="arena"
         maxVisible={3}
         onDismiss={(tid) =>
           setToasts((prev) => prev.filter((x) => x.id !== tid))

@@ -18,11 +18,14 @@ interface ToastStackProps {
   toasts: ToastItem[];
   onDismiss: (id: string) => void;
   /**
-   * Layout slot for arena — never bottom-right over the order form.
-   * @default 'top-right'
+   * Layout slot for arena — never over timer / order form.
+   * @default 'arena'
    */
-  position?: 'top-right' | 'top-center' | 'bottom-right';
-  /** Max cards shown (older dropped). @default 3 */
+  position?: 'arena' | 'top-right' | 'top-center' | 'bottom-right';
+  /**
+   * Hard cap on visible cards (FIFO: oldest dropped when over).
+   * @default 3
+   */
   maxVisible?: number;
 }
 
@@ -34,7 +37,14 @@ const TONE: Record<ToastTone, string> = {
 };
 
 const POSITION: Record<NonNullable<ToastStackProps['position']>, string> = {
-  // Under header/timer — clear of order form + My trades
+  /**
+   * BR arena default: same top band as before, shifted LEFT so the
+   * match TIMER (header top-right) stays fully readable.
+   * Desktop: sit in free space left of the ~280px ranking column.
+   * Mobile: inset from right so timer digit stays clear.
+   */
+  arena:
+    'fixed top-14 z-[60] right-16 sm:top-16 sm:right-24 lg:right-[18.5rem]',
   'top-right':
     'fixed top-14 right-2 z-[60] sm:top-16 sm:right-3',
   'top-center':
@@ -42,15 +52,19 @@ const POSITION: Record<NonNullable<ToastStackProps['position']>, string> = {
   'bottom-right': 'fixed bottom-4 right-4 z-[60]',
 };
 
+const HARD_MAX = 3;
+
 /** Compact fixed toast stack for arena feedback (non-blocking) */
 export function ToastStack({
   toasts,
   onDismiss,
-  position = 'top-right',
-  maxVisible = 3,
+  position = 'arena',
+  maxVisible = HARD_MAX,
 }: ToastStackProps) {
   if (toasts.length === 0) return null;
-  const visible = toasts.slice(-maxVisible);
+  // FIFO window: always the last N (newest), never more than HARD_MAX
+  const cap = Math.min(Math.max(1, maxVisible), HARD_MAX);
+  const visible = toasts.slice(-cap);
 
   return (
     <div
