@@ -16,6 +16,16 @@ import { PrizeBreakdownCard } from '@/components/br/prize-breakdown-card';
 
 type Step = 'nick' | 'asset' | 'queue';
 
+const ASSET_META: Record<
+  BrAsset,
+  { label: string; short: string }
+> = {
+  EURUSD: { label: COPY.demo.assetLabels.EURUSD, short: 'FX' },
+  NAS100: { label: COPY.demo.assetLabels.NAS100, short: 'IDX' },
+  BTCUSD: { label: COPY.demo.assetLabels.BTCUSD, short: 'CRYPTO' },
+  XAUUSD: { label: COPY.demo.assetLabels.XAUUSD, short: 'METAL' },
+};
+
 export default function DemoPage() {
   const { user, startDemo, loading: authLoading } = useAuth();
   const router = useRouter();
@@ -69,7 +79,6 @@ export default function DemoPage() {
     const onQ = (snap: BrQueueSnapshot) => {
       if (!snap?.matchId) return;
       setQueue((prev) => {
-        // Prefer updates for our current queue match
         if (prev && prev.matchId === snap.matchId) {
           return {
             ...prev,
@@ -78,7 +87,6 @@ export default function DemoPage() {
             isDemo: snap.isDemo ?? prev.isDemo ?? true,
           };
         }
-        // Accept first demo snapshot if we are waiting without local state
         if (!prev && (snap.isDemo || snap.demoBotsEnabled)) {
           return { ...snap, phase: 'queue' as const };
         }
@@ -101,7 +109,7 @@ export default function DemoPage() {
     };
   }, [user, router]);
 
-  // Polling fallback while finding match (if WS is down / flaky in production)
+  // Polling fallback while finding match
   useEffect(() => {
     if (step !== 'queue' || !user) return;
     let cancelled = false;
@@ -123,7 +131,7 @@ export default function DemoPage() {
           router.push(`/br/${snap.matchId}`);
         }
       } catch {
-        /* ignore transient poll errors */
+        /* ignore */
       }
     };
     void tick();
@@ -152,7 +160,6 @@ export default function DemoPage() {
     setBusy(true);
     try {
       if (!user) await startDemo(nickname || 'Trader');
-      // Ensure WS is up before bots start filling so we receive br:queue_update
       ensureBrSocketConnected();
       const snap = await brApi.joinDemoQueue({ asset });
       setQueue(snap);
@@ -191,7 +198,7 @@ export default function DemoPage() {
   }
 
   return (
-    <div className="mx-auto max-w-md space-y-8 pb-24 pt-4 md:pb-10">
+    <div className="mx-auto max-w-md space-y-6 pb-24 pt-4 md:pb-10">
       <div className="text-center">
         <span className="inline-flex rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-primary">
           {COPY.demo.badge}
@@ -214,8 +221,9 @@ export default function DemoPage() {
         </p>
       )}
 
+      {/* ── Step 1: Nickname ───────────────────────────────────────────── */}
       {step === 'nick' && (
-        <section className="space-y-4 rounded-lg border border-border bg-card p-5 shadow-panel">
+        <section className="space-y-4 rounded-lg border border-border bg-card p-5 shadow-panel animate-fade-up">
           <div>
             <label className="label-caps mb-2 block">{COPY.demo.nickLabel}</label>
             <Input
@@ -243,6 +251,9 @@ export default function DemoPage() {
             )}
           </Button>
           <p className="text-center text-xs text-muted-foreground">
+            {COPY.demo.nickFooter}
+          </p>
+          <p className="text-center text-xs text-muted-foreground">
             <Link href="/" className="hover:text-foreground hover:underline">
               {COPY.demo.back}
             </Link>
@@ -250,26 +261,46 @@ export default function DemoPage() {
         </section>
       )}
 
+      {/* ── Step 2: Asset ──────────────────────────────────────────────── */}
       {step === 'asset' && (
-        <section className="space-y-5 rounded-lg border border-border bg-card p-5 shadow-panel">
+        <section className="space-y-5 rounded-lg border border-border bg-card p-5 shadow-panel animate-fade-up">
+          <div className="rounded-md border border-border bg-secondary/25 px-3 py-2 text-center text-[11px] text-muted-foreground">
+            {COPY.demo.assetHint}
+          </div>
           <div>
             <p className="label-caps mb-2">{COPY.lobby.asset}</p>
             <div className="grid grid-cols-2 gap-2">
-              {BR_ASSETS.map((a) => (
-                <button
-                  key={a}
-                  type="button"
-                  onClick={() => setAsset(a)}
-                  className={cn(
-                    'h-12 rounded-md border font-mono text-sm font-semibold transition-colors',
-                    asset === a
-                      ? 'border-primary/40 bg-primary/10 text-primary'
-                      : 'border-border text-muted-foreground hover:bg-secondary',
-                  )}
-                >
-                  {a}
-                </button>
-              ))}
+              {BR_ASSETS.map((a) => {
+                const meta = ASSET_META[a];
+                return (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => setAsset(a)}
+                    className={cn(
+                      'flex flex-col items-start rounded-lg border px-3 py-3 text-left transition-colors',
+                      asset === a
+                        ? 'border-primary/40 bg-primary/10'
+                        : 'border-border text-muted-foreground hover:bg-secondary',
+                    )}
+                  >
+                    <span className="text-[9px] font-bold uppercase tracking-wider opacity-70">
+                      {meta.short}
+                    </span>
+                    <span
+                      className={cn(
+                        'font-mono text-sm font-semibold',
+                        asset === a && 'text-primary',
+                      )}
+                    >
+                      {a}
+                    </span>
+                    <span className="mt-0.5 text-[11px] text-muted-foreground">
+                      {meta.label}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
           <Button
@@ -296,14 +327,15 @@ export default function DemoPage() {
               className="hover:text-foreground hover:underline"
               onClick={() => setStep('nick')}
             >
-              Change nickname
+              {COPY.demo.changeNick}
             </button>
           </p>
         </section>
       )}
 
+      {/* ── Step 3: Queue ──────────────────────────────────────────────── */}
       {step === 'queue' && queue && (
-        <section className="rounded-lg border border-primary/30 bg-card p-5 shadow-panel">
+        <section className="rounded-lg border border-primary/30 bg-card p-5 shadow-panel animate-fade-up">
           <div className="mb-4 flex items-start justify-between">
             <div>
               <p className="label-caps mb-1 flex items-center gap-1.5 text-primary">
@@ -311,11 +343,14 @@ export default function DemoPage() {
                 {COPY.demo.queueBadge}
               </p>
               <h2 className="font-mono text-xl font-semibold">{queue.asset}</h2>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {ASSET_META[queue.asset as BrAsset]?.label ?? queue.asset}
+              </p>
             </div>
             <div className="text-right">
-              <p className="mono-num text-2xl font-bold tabular-nums">
+              <p className="mono-num text-3xl font-black tabular-nums tracking-tight">
                 {queue.playerCount}
-                <span className="text-base text-muted-foreground">
+                <span className="text-lg text-muted-foreground">
                   /{queue.maxPlayers}
                 </span>
               </p>
@@ -323,7 +358,7 @@ export default function DemoPage() {
             </div>
           </div>
 
-          <div className="mb-4 h-2 overflow-hidden rounded-full bg-secondary">
+          <div className="mb-4 h-2.5 overflow-hidden rounded-full bg-secondary">
             <div
               className="h-full rounded-full bg-primary transition-all duration-300"
               style={{
@@ -331,6 +366,10 @@ export default function DemoPage() {
               }}
             />
           </div>
+
+          <p className="mb-4 text-center text-xs leading-relaxed text-muted-foreground">
+            {COPY.demo.queueHint}
+          </p>
 
           {queue.playerCount < queue.minPlayers && (
             <div className="mb-4 rounded-md border border-border bg-secondary/30 px-3 py-2.5 text-sm">
