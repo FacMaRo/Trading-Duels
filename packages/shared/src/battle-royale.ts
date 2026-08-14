@@ -25,6 +25,11 @@ export const BR_COUNTDOWN_SECONDS = 60;
  */
 export const BR_FULL_LOBBY_COUNTDOWN_SECONDS = 10;
 export const BR_MATCH_DURATION_SECONDS = 10 * 60; // 10 min
+/**
+ * Post-lock intro before the official 10:00 trading clock.
+ * Outside BR_MATCH_DURATION — liveStartedAt is delayed by this many seconds.
+ */
+export const BR_MATCH_INTRO_SECONDS = 5;
 
 export const BR_VIRTUAL_CAPITAL = 10_000;
 export const BR_MAX_TRADES = 2;

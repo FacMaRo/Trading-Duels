@@ -27,6 +27,7 @@ import {
   BR_FREE_ENTRY_STAKE,
   BR_FULL_LOBBY_COUNTDOWN_SECONDS,
   BR_MATCH_DURATION_SECONDS,
+  BR_MATCH_INTRO_SECONDS,
   BR_MAX_PLAYERS,
   BR_MAX_RISK_PCT,
   BR_MAX_TRADES,
@@ -849,6 +850,30 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Trades ──────────────────────────────────────────────────────────────
 
+  /** LIVE status + past match intro (official trading clock started). */
+  private isMatchTradingOpen(match: {
+    status: BrMatchStatus;
+    liveStartedAt: Date | null;
+  }): boolean {
+    if (match.status !== BrMatchStatus.LIVE) return false;
+    if (!match.liveStartedAt) return true; // legacy rows
+    return Date.now() >= match.liveStartedAt.getTime();
+  }
+
+  private assertMatchTradingOpen(match: {
+    status: BrMatchStatus;
+    liveStartedAt: Date | null;
+  }) {
+    if (match.status !== BrMatchStatus.LIVE) {
+      throw new BadRequestException('Match is not live');
+    }
+    if (!this.isMatchTradingOpen(match)) {
+      throw new BadRequestException(
+        'Match is starting — trading opens in a few seconds',
+      );
+    }
+  }
+
   async openTrade(
     matchId: string,
     userId: string,
@@ -864,9 +889,7 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     const match = await this.prisma.brMatch.findUniqueOrThrow({
       where: { id: matchId },
     });
-    if (match.status !== BrMatchStatus.LIVE) {
-      throw new BadRequestException('Match is not live');
-    }
+    this.assertMatchTradingOpen(match);
 
     let player = await this.prisma.brMatchPlayer.findUnique({
       where: { matchId_userId: { matchId, userId } },
@@ -1026,6 +1049,10 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
   }
 
   async closeTrade(matchId: string, userId: string, tradeId: string) {
+    const match = await this.prisma.brMatch.findUniqueOrThrow({
+      where: { id: matchId },
+    });
+    this.assertMatchTradingOpen(match);
     const trade = await this.prisma.brTrade.findFirst({
       where: { id: tradeId, matchId, userId },
     });
@@ -1063,6 +1090,10 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
   }
 
   async cancelTrade(matchId: string, userId: string, tradeId: string) {
+    const match = await this.prisma.brMatch.findUniqueOrThrow({
+      where: { id: matchId },
+    });
+    this.assertMatchTradingOpen(match);
     const trade = await this.prisma.brTrade.findFirst({
       where: { id: tradeId, matchId, userId },
     });
@@ -1123,9 +1154,7 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     const match = await this.prisma.brMatch.findUniqueOrThrow({
       where: { id: matchId },
     });
-    if (match.status !== BrMatchStatus.LIVE) {
-      throw new BadRequestException('Match is not live');
-    }
+    this.assertMatchTradingOpen(match);
 
     const trade = await this.prisma.brTrade.findFirst({
       where: { id: tradeId, matchId, userId },
@@ -1386,15 +1415,19 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     }
 
     const now = new Date();
+    // Intro (MATCH STARTING) is outside the 10:00 trading clock
+    const introMs = BR_MATCH_INTRO_SECONDS * 1000;
+    const liveStartedAt = new Date(now.getTime() + introMs);
     const liveEndsAt = new Date(
-      now.getTime() + match.durationSeconds * 1000,
+      liveStartedAt.getTime() + match.durationSeconds * 1000,
     );
 
     await this.prisma.brMatch.update({
       where: { id: matchId },
       data: {
         status: BrMatchStatus.LIVE,
-        liveStartedAt: now,
+        // liveStartedAt = when trading clock begins (after intro)
+        liveStartedAt,
         liveEndsAt,
       },
     });
@@ -1406,7 +1439,7 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
 
     this.market.retainAsset(match.asset);
     this.logger.log(
-      `BR START ${matchId} · ${match.playerCount} players · promoted=${promoted.count} · ${match.asset} · demo=${match.isDemo} · $${toNumber(match.stake)}`,
+      `BR START ${matchId} · ${match.playerCount} players · promoted=${promoted.count} · ${match.asset} · demo=${match.isDemo} · $${toNumber(match.stake)} · intro=${BR_MATCH_INTRO_SECONDS}s · tradeStart=${liveStartedAt.toISOString()}`,
     );
 
     // Public snapshot for room (clients merge with local seat data)
@@ -1675,10 +1708,16 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
         status: { in: [TradeStatus.OPEN, TradeStatus.PENDING] },
         match: { status: BrMatchStatus.LIVE },
       },
+      include: {
+        match: { select: { liveStartedAt: true, status: true } },
+      },
     });
 
     for (const trade of trades) {
       try {
+        // No fills / SL-TP during MATCH STARTING intro
+        if (!this.isMatchTradingOpen(trade.match)) continue;
+
         if (trade.status === TradeStatus.PENDING && trade.entryPrice != null) {
           if (
             shouldActivateLimit(
@@ -2052,6 +2091,8 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     });
     if (!match?.isDemo || match.status !== BrMatchStatus.LIVE) return;
     if (!match.liveStartedAt || !match.liveEndsAt) return;
+    // No bot trading during MATCH STARTING intro
+    if (!this.isMatchTradingOpen(match)) return;
 
     const now = Date.now();
     const start = match.liveStartedAt.getTime();

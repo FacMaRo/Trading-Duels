@@ -15,6 +15,7 @@ import { ensureBrSocketConnected } from '@/lib/socket';
 import { PriceChart } from '@/components/duel/price-chart';
 import { BrResultModal } from '@/components/br/br-result-modal';
 import { BrMatchChat } from '@/components/br/br-match-chat';
+import { MatchStartOverlay } from '@/components/br/match-start-overlay';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { PremiumBadge } from '@/components/ui/premium-badge';
@@ -343,17 +344,38 @@ export default function BrArenaPage() {
     return any ? sum : null;
   }, [trades, livePnlByTradeId]);
 
-  const msLeft = match?.liveEndsAt
-    ? Math.max(0, new Date(match.liveEndsAt).getTime() - now)
-    : 0;
   const isLive = match?.status === 'LIVE';
   const isCompleted = match?.status === 'COMPLETED';
   const isFinished =
     match?.status === 'COMPLETED' || match?.status === 'SETTLING';
 
+  // Trading clock starts at liveStartedAt (after 5s MATCH STARTING intro)
+  const tradeStartMs = match?.liveStartedAt
+    ? new Date(match.liveStartedAt).getTime()
+    : 0;
+  const tradeEndMs = match?.liveEndsAt
+    ? new Date(match.liveEndsAt).getTime()
+    : 0;
+  const matchDurationMs =
+    tradeStartMs > 0 && tradeEndMs > tradeStartMs
+      ? tradeEndMs - tradeStartMs
+      : 600_000;
+  const isIntro =
+    isLive && tradeStartMs > 0 && now < tradeStartMs;
+  /** Official trading window — after intro */
+  const isTrading = isLive && !isIntro;
+  // During intro freeze display at full 10:00; then count down liveEndsAt
+  const msLeft = !isLive
+    ? 0
+    : isIntro
+      ? matchDurationMs
+      : tradeEndMs > 0
+        ? Math.max(0, tradeEndMs - now)
+        : 0;
+
   // Rank / zone change flash + toast (throttled unless zone changes)
   useEffect(() => {
-    if (!isLive || !match?.me) return;
+    if (!isTrading || !match?.me) return;
     const r = match.me.rank;
     const zone = (match.me.zone ?? 'OUT') as BrPrizeZone;
     const prevRank = prevMyRankRef.current;
@@ -406,7 +428,7 @@ export default function BrArenaPage() {
     return () => clearTimeout(flashT);
     // match.me used for rank/zone; intentional narrow deps
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLive, match?.me?.rank, match?.me?.zone, pushToast]);
+  }, [isTrading, match?.me?.rank, match?.me?.zone, pushToast]);
 
   useEffect(() => {
     if (!isCompleted || !user || resultSeen) return;
@@ -463,7 +485,7 @@ export default function BrArenaPage() {
   }, [match?.leaderboard, match?.prizeStructure]);
 
   const timerUrgency =
-    isLive && msLeft > 0
+    isTrading && msLeft > 0
       ? msLeft <= 30_000
         ? 'critical'
         : msLeft <= 60_000
@@ -574,9 +596,9 @@ export default function BrArenaPage() {
           stopLoss: t.stopLoss,
           takeProfit: t.takeProfit,
           label: COPY.arena.me,
-          draggable: isLive,
+          draggable: isTrading,
         })),
-    [trades, isLive],
+    [trades, isTrading],
   );
 
   const handleChartLevelsCommit = useCallback(
@@ -668,8 +690,10 @@ export default function BrArenaPage() {
   async function openTrade() {
     setFormError('');
 
-    if (!isLive) {
-      showFormError(COPY.arena.notLive);
+    if (!isTrading) {
+      showFormError(
+        isIntro ? COPY.arena.tradingSoon : COPY.arena.notLive,
+      );
       return;
     }
 
@@ -978,10 +1002,17 @@ export default function BrArenaPage() {
     );
   const tradesLeft =
     (match.myStats?.maxTrades ?? 2) - (match.myStats?.tradeCount ?? 0);
-  const canAttemptTrade = isLive && seated && tradesLeft > 0;
+  const canAttemptTrade = isTrading && seated && tradesLeft > 0;
 
   return (
-    <div className="arena-root flex h-[calc(100vh-3.5rem)] max-h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-[hsl(210_22%_5%)]">
+    <div className="arena-root relative flex h-[calc(100vh-3.5rem)] max-h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-[hsl(210_22%_5%)]">
+      {isLive && (
+        <MatchStartOverlay
+          liveStartedAt={match.liveStartedAt}
+          asset={match.asset}
+          playerCount={match.playerCount}
+        />
+      )}
       {/* Compact header */}
       <header className="z-30 shrink-0 border-b border-border bg-[hsl(210_20%_6%/0.96)] backdrop-blur-xl">
         <div className="flex flex-wrap items-center gap-2 px-2.5 py-1.5 sm:gap-3 sm:px-3">
@@ -1129,7 +1160,7 @@ export default function BrArenaPage() {
                 liveMid={liveMid}
                 className="h-full w-full"
                 onLevelsCommit={
-                  isLive ? handleChartLevelsCommit : undefined
+                  isTrading ? handleChartLevelsCommit : undefined
                 }
                 onLevelsInvalid={(msg) =>
                   pushToast(msg || COPY.arena.levelsDragInvalid, 'danger')
@@ -1144,7 +1175,7 @@ export default function BrArenaPage() {
                 {COPY.arena.myTrades} ({match.myStats?.tradeCount ?? 0}/
                 {match.myStats?.maxTrades ?? 2})
               </h3>
-              {isLive && openPnlSum != null && (
+              {isTrading && openPnlSum != null && (
                 <p className="text-[11px] font-medium">
                   <span className="text-muted-foreground">
                     {COPY.arena.openPnl}{' '}
@@ -1171,7 +1202,7 @@ export default function BrArenaPage() {
                 {trades.map((t) => {
                   const closedBy = (t.closeReason || '').toUpperCase();
                   const canEdit =
-                    isLive &&
+                    isTrading &&
                     (t.status === 'OPEN' || t.status === 'PENDING');
                   const live = livePnlByTradeId.get(t.id);
                   const isOpen = t.status === 'OPEN';
@@ -1288,7 +1319,7 @@ export default function BrArenaPage() {
                               {COPY.arena.editLevels}
                             </Button>
                           )}
-                          {t.status === 'OPEN' && isLive && (
+                          {t.status === 'OPEN' && isTrading && (
                             <Button
                               size="sm"
                               variant="outline"
@@ -1299,7 +1330,7 @@ export default function BrArenaPage() {
                               {COPY.arena.close}
                             </Button>
                           )}
-                          {t.status === 'PENDING' && isLive && (
+                          {t.status === 'PENDING' && isTrading && (
                             <Button
                               size="sm"
                               variant="ghost"
@@ -1508,7 +1539,7 @@ export default function BrArenaPage() {
                   #{match.me.rank}
                 </span>{' '}
                 · {formatUsd(match.me.totalPnl)}
-                {isLive && openPnlSum != null && (
+                {isTrading && openPnlSum != null && (
                   <>
                     {' '}
                     ·{' '}
@@ -1702,16 +1733,18 @@ export default function BrArenaPage() {
 
               {!canAttemptTrade && isLive && (
                 <p className="mb-1.5 text-[10px] text-muted-foreground">
-                  {!seated
-                    ? COPY.arena.noSeat
-                    : COPY.arena.maxTrades(match.myStats?.maxTrades ?? 2)}
+                  {isIntro
+                    ? COPY.arena.tradingSoon
+                    : !seated
+                      ? COPY.arena.noSeat
+                      : COPY.arena.maxTrades(match.myStats?.maxTrades ?? 2)}
                 </p>
               )}
 
               <Button
                 type="button"
                 className="h-9 w-full text-xs font-bold"
-                disabled={busy || !isLive}
+                disabled={busy || !isTrading}
                 onClick={() => void openTrade()}
               >
                 {busy ? (
