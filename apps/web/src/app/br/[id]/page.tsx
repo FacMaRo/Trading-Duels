@@ -25,7 +25,7 @@ import {
   validateTakeProfitSide,
 } from '@/components/ui/price-input';
 import { ToastStack, type ToastItem } from '@/components/ui/toast';
-import { cn, formatUsd } from '@/lib/utils';
+import { cn, formatR, formatSignedUsd, formatUsd } from '@/lib/utils';
 import { TIMEFRAMES } from '@/lib/arena';
 import { COPY } from '@/lib/copy';
 import {
@@ -33,6 +33,10 @@ import {
   isSfxEnabled,
   setSfxEnabled,
 } from '@/lib/arena-sounds';
+import {
+  unrealizedTradePnlUsd,
+  unrealizedTradeR,
+} from '@/lib/br-pnl';
 import type { BrPrizeZone } from '@/lib/api';
 
 export default function BrArenaPage() {
@@ -198,25 +202,52 @@ export default function BrArenaPage() {
     return () => clearInterval(t);
   }, []);
 
-  // Live mid for SL validation / display
+  // Live mid — WS ticks (primary) + REST poll fallback for unrealized PnL
   useEffect(() => {
     if (!match?.asset) return;
     let cancelled = false;
+    const asset = match.asset;
+
+    const applyMid = (mid: number) => {
+      if (!cancelled && Number.isFinite(mid) && mid > 0) setLiveMid(mid);
+    };
+
     const poll = async () => {
       try {
-        const tick = await marketApi.price(match.asset);
-        if (!cancelled && tick?.mid != null && Number.isFinite(tick.mid)) {
-          setLiveMid(tick.mid);
-        }
+        const tick = await marketApi.price(asset);
+        if (tick?.mid != null) applyMid(tick.mid);
       } catch {
         /* ignore */
       }
     };
     void poll();
-    const t = setInterval(poll, 1500);
+    const pollT = setInterval(poll, 2000);
+
+    const socket = ensureBrSocketConnected();
+    socket.emit('market:subscribe', { asset });
+    const onTick = (tick: {
+      asset?: string;
+      mid?: number;
+      bid?: number;
+      ask?: number;
+    }) => {
+      if (
+        tick?.asset &&
+        tick.asset.toUpperCase() !== asset.toUpperCase()
+      ) {
+        return;
+      }
+      if (tick?.mid != null) applyMid(tick.mid);
+      else if (tick?.bid != null && tick?.ask != null) {
+        applyMid((tick.bid + tick.ask) / 2);
+      }
+    };
+    socket.on('price:tick', onTick);
+
     return () => {
       cancelled = true;
-      clearInterval(t);
+      clearInterval(pollT);
+      socket.off('price:tick', onTick);
     };
   }, [match?.asset]);
 
@@ -250,6 +281,51 @@ export default function BrArenaPage() {
       socket.off('br:trade_update', onTrade);
     };
   }, [id, user, authLoading, apply, load, handleTradeEvent]);
+
+  /** Per-trade live unrealized PnL $ (OPEN only; PENDING → null) */
+  const livePnlByTradeId = useMemo(() => {
+    const map = new Map<string, { pnl: number | null; r: number | null }>();
+    for (const t of trades) {
+      if (t.status === 'PENDING') {
+        map.set(t.id, { pnl: null, r: null });
+        continue;
+      }
+      if (t.status !== 'OPEN') continue;
+      if (liveMid == null) {
+        map.set(t.id, { pnl: null, r: null });
+        continue;
+      }
+      const pnl = unrealizedTradePnlUsd({
+        side: t.side,
+        entryPrice: t.entryPrice,
+        stopLoss: t.stopLoss,
+        riskAmount: t.riskAmount,
+        mid: liveMid,
+      });
+      const r = unrealizedTradeR({
+        side: t.side,
+        entryPrice: t.entryPrice,
+        stopLoss: t.stopLoss,
+        mid: liveMid,
+      });
+      map.set(t.id, { pnl, r });
+    }
+    return map;
+  }, [trades, liveMid]);
+
+  const openPnlSum = useMemo(() => {
+    let sum = 0;
+    let any = false;
+    for (const t of trades) {
+      if (t.status !== 'OPEN') continue;
+      const v = livePnlByTradeId.get(t.id)?.pnl;
+      if (v != null) {
+        sum += v;
+        any = true;
+      }
+    }
+    return any ? sum : null;
+  }, [trades, livePnlByTradeId]);
 
   const msLeft = match?.liveEndsAt
     ? Math.max(0, new Date(match.liveEndsAt).getTime() - now)
@@ -954,10 +1030,29 @@ export default function BrArenaPage() {
           </section>
 
           <section className="max-h-[32vh] shrink-0 overflow-y-auto rounded-md border border-border bg-card p-2 sm:max-h-[26vh]">
-            <h3 className="label-caps mb-1.5 !text-[9px]">
-              {COPY.arena.myTrades} ({match.myStats?.tradeCount ?? 0}/
-              {match.myStats?.maxTrades ?? 2})
-            </h3>
+            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5">
+              <h3 className="label-caps !text-[9px]">
+                {COPY.arena.myTrades} ({match.myStats?.tradeCount ?? 0}/
+                {match.myStats?.maxTrades ?? 2})
+              </h3>
+              {isLive && openPnlSum != null && (
+                <p className="text-[11px] font-medium">
+                  <span className="text-muted-foreground">
+                    {COPY.arena.openPnl}{' '}
+                  </span>
+                  <span
+                    className={cn(
+                      'mono-num text-sm font-bold tabular-nums',
+                      openPnlSum > 0 && 'text-success',
+                      openPnlSum < 0 && 'text-destructive',
+                      openPnlSum === 0 && 'text-muted-foreground',
+                    )}
+                  >
+                    {formatSignedUsd(openPnlSum)}
+                  </span>
+                </p>
+              )}
+            </div>
             {trades.length === 0 ? (
               <p className="text-[11px] text-muted-foreground">
                 {COPY.arena.noTrades}
@@ -969,6 +1064,11 @@ export default function BrArenaPage() {
                   const canEdit =
                     isLive &&
                     (t.status === 'OPEN' || t.status === 'PENDING');
+                  const live = livePnlByTradeId.get(t.id);
+                  const isOpen = t.status === 'OPEN';
+                  const isPending = t.status === 'PENDING';
+                  const livePnl = isOpen ? live?.pnl : null;
+                  const liveR = isOpen ? live?.r : null;
                   return (
                     <li
                       key={t.id}
@@ -981,6 +1081,14 @@ export default function BrArenaPage() {
                         t.status === 'CLOSED' &&
                           closedBy === 'TP' &&
                           'border-success/30',
+                        isOpen &&
+                          livePnl != null &&
+                          livePnl > 0 &&
+                          'border-success/20 bg-success/[0.06]',
+                        isOpen &&
+                          livePnl != null &&
+                          livePnl < 0 &&
+                          'border-destructive/20 bg-destructive/[0.06]',
                       )}
                     >
                       <div className="flex items-center justify-between gap-2">
@@ -1011,16 +1119,47 @@ export default function BrArenaPage() {
                               ? ` · TP ${formatPrice(t.takeProfit)}`
                               : ''}
                           </span>
-                          {t.pnl != null && (
+                          {/* Live unrealized PnL (OPEN) */}
+                          {isOpen && (
                             <span
                               className={cn(
-                                'mono-num ml-1.5 font-semibold',
-                                t.pnl >= 0
-                                  ? 'text-success'
-                                  : 'text-destructive',
+                                'mono-num ml-1.5 text-sm font-bold tabular-nums sm:text-base',
+                                livePnl == null && 'text-muted-foreground',
+                                livePnl != null &&
+                                  livePnl > 0 &&
+                                  'text-success',
+                                livePnl != null &&
+                                  livePnl < 0 &&
+                                  'text-destructive',
+                                livePnl === 0 && 'text-muted-foreground',
                               )}
                             >
-                              {formatUsd(t.pnl)}
+                              {livePnl != null
+                                ? formatSignedUsd(livePnl)
+                                : '…'}
+                              {liveR != null && (
+                                <span className="ml-1 text-[10px] font-medium opacity-70">
+                                  ({formatR(liveR)})
+                                </span>
+                              )}
+                            </span>
+                          )}
+                          {isPending && (
+                            <span className="mono-num ml-1.5 text-muted-foreground">
+                              {COPY.arena.pendingPnl}
+                            </span>
+                          )}
+                          {/* Realized PnL (CLOSED) */}
+                          {t.status === 'CLOSED' && t.pnl != null && (
+                            <span
+                              className={cn(
+                                'mono-num ml-1.5 text-sm font-bold tabular-nums',
+                                t.pnl > 0 && 'text-success',
+                                t.pnl < 0 && 'text-destructive',
+                                t.pnl === 0 && 'text-muted-foreground',
+                              )}
+                            >
+                              {formatSignedUsd(t.pnl)}
                             </span>
                           )}
                         </span>
@@ -1260,6 +1399,25 @@ export default function BrArenaPage() {
                   #{match.me.rank}
                 </span>{' '}
                 · {formatUsd(match.me.totalPnl)}
+                {isLive && openPnlSum != null && (
+                  <>
+                    {' '}
+                    ·{' '}
+                    <span className="text-muted-foreground">
+                      {COPY.arena.openPnl}{' '}
+                    </span>
+                    <span
+                      className={cn(
+                        'mono-num font-bold tabular-nums',
+                        openPnlSum > 0 && 'text-success',
+                        openPnlSum < 0 && 'text-destructive',
+                        openPnlSum === 0 && 'text-muted-foreground',
+                      )}
+                    >
+                      {formatSignedUsd(openPnlSum)}
+                    </span>
+                  </>
+                )}
                 {match.me.zone === 'PRIZE' && (
                   <span className="ml-1 text-success">· prize</span>
                 )}

@@ -144,6 +144,8 @@ export const COPY = {
     end: 'END',
     myTrades: 'My trades',
     noTrades: 'No trades yet',
+    openPnl: 'Open PnL',
+    pendingPnl: '—',
     liveRanking: 'Live ranking',
     yourPosition: 'Your position',
     you: 'you',

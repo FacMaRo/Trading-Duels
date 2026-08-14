@@ -14,6 +14,12 @@ export function formatUsd(value: number, digits = 2): string {
   }).format(value);
 }
 
+/** Signed USD for live PnL: +$42.15 / -$18.40 / $0.00 */
+export function formatSignedUsd(value: number, digits = 2): string {
+  if (value > 0) return `+${formatUsd(value, digits)}`;
+  return formatUsd(value, digits);
+}
+
 export function formatR(value: number): string {
   const sign = value > 0 ? '+' : '';
   return `${sign}${value.toFixed(2)}R`;
