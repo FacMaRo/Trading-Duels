@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   createChart,
   type IChartApi,
@@ -13,8 +13,13 @@ import {
 } from 'lightweight-charts';
 import { marketApi } from '@/lib/api';
 import { ensureDuelsSocketConnected } from '@/lib/socket';
+import {
+  isStopLossValid,
+  isTakeProfitValid,
+} from '@trading-duels/shared';
+import { cn } from '@/lib/utils';
 
-/** Niveles de un trade abierto/pending para dibujar en el chart */
+/** Levels for an open/pending trade drawn on the chart */
 export interface ChartTradeLevels {
   id: string;
   asset: string;
@@ -23,20 +28,35 @@ export interface ChartTradeLevels {
   entryPrice: number | null;
   stopLoss: number;
   takeProfit: number | null;
-  /**
-   * Etiqueta corta del dueño (ej. "Yo", "alice").
-   * Se usa en el título de cada línea para distinguir trades.
-   */
+  /** Short owner tag (e.g. "Me") */
   label?: string;
+  /** When true and parent provides onLevelsCommit, SL/TP lines are draggable */
+  draggable?: boolean;
 }
+
+export type LevelDragCommit = {
+  tradeId: string;
+  stopLoss: number;
+  takeProfit: number | null;
+  previous: { stopLoss: number; takeProfit: number | null };
+};
 
 interface PriceChartProps {
   asset: string;
   timeframe: string;
-  /** Trades abiertos/pending (cualquier jugador); se filtran por asset */
+  /** Active trades (open/pending); filtered by asset */
   trades?: ChartTradeLevels[];
-  /** Altura fija opcional; si no, llena el contenedor (min 280) */
   className?: string;
+  /**
+   * Called on pointer release after a valid SL/TP drag.
+   * Parent should call updateTradeLevels and throw/reject on failure
+   * so the chart can revert.
+   */
+  onLevelsCommit?: (args: LevelDragCommit) => Promise<void>;
+  /** Optional live mid for open-trade SL/TP market-side validation */
+  liveMid?: number | null;
+  /** Called when drag ends with invalid level (line already reverted) */
+  onLevelsInvalid?: (message: string) => void;
 }
 
 const COLORS = {
@@ -44,6 +64,28 @@ const COLORS = {
   stopLoss: '#ef4444',
   takeProfit: '#22c55e',
 } as const;
+
+const HIT_PX = 10;
+
+type LineKind = 'entry' | 'sl' | 'tp';
+
+type LineMeta = {
+  line: IPriceLine;
+  tradeId: string;
+  kind: LineKind;
+  price: number;
+  trade: ChartTradeLevels;
+  draggable: boolean;
+  tag: string;
+};
+
+type DragState = {
+  meta: LineMeta;
+  startPrice: number;
+  currentPrice: number;
+  /** Full levels at drag start (for rollback) */
+  previous: { stopLoss: number; takeProfit: number | null };
+};
 
 function timeframeSeconds(tf: string): number {
   const map: Record<string, number> = {
@@ -66,10 +108,6 @@ function sideShort(side: string): string {
   return side === 'SHORT' ? 'S' : 'L';
 }
 
-/**
- * Tag legible y corto para el eje de precio.
- * Ej: "Yo L", "alice S#2"
- */
 function tradeTag(
   trade: ChartTradeLevels,
   indexAmongActive: number,
@@ -91,67 +129,86 @@ function clearPriceLines(
     try {
       series.removePriceLine(line);
     } catch {
-      /* series puede estar ya destruida */
+      /* series may already be destroyed */
     }
   }
 }
 
-function createTradePriceLines(
-  series: ISeriesApi<'Candlestick'>,
+function formatPx(n: number): string {
+  if (n >= 1000) return n.toFixed(2);
+  if (n >= 10) return n.toFixed(3);
+  return n.toFixed(5);
+}
+
+function validateLevel(
   trade: ChartTradeLevels,
-  tag: string,
-): IPriceLine[] {
-  const lines: IPriceLine[] = [];
-  const pending = trade.status === 'PENDING';
-
-  if (
-    trade.entryPrice != null &&
-    Number.isFinite(trade.entryPrice) &&
-    trade.entryPrice > 0
-  ) {
-    lines.push(
-      series.createPriceLine({
-        price: trade.entryPrice,
-        color: COLORS.entry,
-        lineWidth: 2,
-        lineStyle: pending ? LineStyle.Dotted : LineStyle.Solid,
-        axisLabelVisible: true,
-        title: `${tag} Entry`,
-      }),
-    );
+  kind: 'sl' | 'tp',
+  price: number,
+  liveMid?: number | null,
+): { ok: true } | { ok: false; message: string } {
+  const side = trade.side === 'SHORT' ? 'SHORT' : 'LONG';
+  const entry = trade.entryPrice;
+  if (entry == null || !(entry > 0)) {
+    return { ok: false, message: 'Trade has no entry price' };
+  }
+  if (!(price > 0) || !Number.isFinite(price)) {
+    return { ok: false, message: 'Invalid price' };
   }
 
-  if (Number.isFinite(trade.stopLoss) && trade.stopLoss > 0) {
-    lines.push(
-      series.createPriceLine({
-        price: trade.stopLoss,
-        color: COLORS.stopLoss,
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `${tag} SL`,
-      }),
-    );
+  if (kind === 'sl') {
+    if (!isStopLossValid(side, entry, price)) {
+      return {
+        ok: false,
+        message:
+          side === 'LONG'
+            ? 'On LONG, stop loss must be below the entry price'
+            : 'On SHORT, stop loss must be above the entry price',
+      };
+    }
+    if (trade.status === 'OPEN' && liveMid != null && liveMid > 0) {
+      if (side === 'LONG' && price >= liveMid) {
+        return {
+          ok: false,
+          message:
+            'Stop loss is at/above current price and would trigger immediately',
+        };
+      }
+      if (side === 'SHORT' && price <= liveMid) {
+        return {
+          ok: false,
+          message:
+            'Stop loss is at/below current price and would trigger immediately',
+        };
+      }
+    }
+  } else {
+    if (!isTakeProfitValid(side, entry, price)) {
+      return {
+        ok: false,
+        message:
+          side === 'LONG'
+            ? 'On LONG, take profit must be above the entry price'
+            : 'On SHORT, take profit must be below the entry price',
+      };
+    }
+    if (trade.status === 'OPEN' && liveMid != null && liveMid > 0) {
+      if (side === 'LONG' && price <= liveMid) {
+        return {
+          ok: false,
+          message:
+            'Take profit is at/below current price and would trigger immediately',
+        };
+      }
+      if (side === 'SHORT' && price >= liveMid) {
+        return {
+          ok: false,
+          message:
+            'Take profit is at/above current price and would trigger immediately',
+        };
+      }
+    }
   }
-
-  if (
-    trade.takeProfit != null &&
-    Number.isFinite(trade.takeProfit) &&
-    trade.takeProfit > 0
-  ) {
-    lines.push(
-      series.createPriceLine({
-        price: trade.takeProfit,
-        color: COLORS.takeProfit,
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `${tag} TP`,
-      }),
-    );
-  }
-
-  return lines;
+  return { ok: true };
 }
 
 export function PriceChart({
@@ -159,6 +216,9 @@ export function PriceChart({
   timeframe,
   trades,
   className,
+  onLevelsCommit,
+  liveMid,
+  onLevelsInvalid,
 }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -168,37 +228,132 @@ export function PriceChart({
   const tfRef = useRef(timeframe);
   const lastPriceEl = useRef<HTMLSpanElement>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
+  const lineMetaRef = useRef<LineMeta[]>([]);
   const tradesRef = useRef(trades);
+  const dragRef = useRef<DragState | null>(null);
+  const liveMidRef = useRef(liveMid);
+  const onLevelsCommitRef = useRef(onLevelsCommit);
+  const onLevelsInvalidRef = useRef(onLevelsInvalid);
+  const [dragPreview, setDragPreview] = useState<{
+    y: number;
+    price: number;
+    kind: 'sl' | 'tp';
+  } | null>(null);
+  const [cursor, setCursor] = useState<'default' | 'ns-resize' | 'grabbing'>(
+    'default',
+  );
 
   assetRef.current = asset;
   tfRef.current = timeframe;
   tradesRef.current = trades;
+  liveMidRef.current = liveMid;
+  onLevelsCommitRef.current = onLevelsCommit;
+  onLevelsInvalidRef.current = onLevelsInvalid;
 
   const syncTradeLines = () => {
     const series = seriesRef.current;
     if (!series) return;
+    // Don't rebuild lines mid-drag (would steal the drag handle)
+    if (dragRef.current) return;
 
     clearPriceLines(series, priceLinesRef.current);
     priceLinesRef.current = [];
+    lineMetaRef.current = [];
 
     const currentAsset = assetRef.current;
     const active = (tradesRef.current ?? []).filter(
       (t) => t.asset === currentAsset && isActiveTrade(t.status),
     );
 
-    const next: IPriceLine[] = [];
+    const nextLines: IPriceLine[] = [];
+    const nextMeta: LineMeta[] = [];
+    const canDrag = !!onLevelsCommitRef.current;
+
     active.forEach((trade, i) => {
       const tag = tradeTag(trade, i, active.length);
-      next.push(...createTradePriceLines(series, trade, tag));
+      const pending = trade.status === 'PENDING';
+      const draggable = !!(canDrag && trade.draggable);
+
+      if (
+        trade.entryPrice != null &&
+        Number.isFinite(trade.entryPrice) &&
+        trade.entryPrice > 0
+      ) {
+        const line = series.createPriceLine({
+          price: trade.entryPrice,
+          color: COLORS.entry,
+          lineWidth: 2,
+          lineStyle: pending ? LineStyle.Dotted : LineStyle.Solid,
+          axisLabelVisible: true,
+          title: `${tag} Entry`,
+        });
+        nextLines.push(line);
+        nextMeta.push({
+          line,
+          tradeId: trade.id,
+          kind: 'entry',
+          price: trade.entryPrice,
+          trade,
+          draggable: false,
+          tag,
+        });
+      }
+
+      if (Number.isFinite(trade.stopLoss) && trade.stopLoss > 0) {
+        const line = series.createPriceLine({
+          price: trade.stopLoss,
+          color: COLORS.stopLoss,
+          lineWidth: draggable ? 2 : 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `${tag} SL${draggable ? ' ⋮' : ''}`,
+        });
+        nextLines.push(line);
+        nextMeta.push({
+          line,
+          tradeId: trade.id,
+          kind: 'sl',
+          price: trade.stopLoss,
+          trade,
+          draggable,
+          tag,
+        });
+      }
+
+      if (
+        trade.takeProfit != null &&
+        Number.isFinite(trade.takeProfit) &&
+        trade.takeProfit > 0
+      ) {
+        const line = series.createPriceLine({
+          price: trade.takeProfit,
+          color: COLORS.takeProfit,
+          lineWidth: draggable ? 2 : 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `${tag} TP${draggable ? ' ⋮' : ''}`,
+        });
+        nextLines.push(line);
+        nextMeta.push({
+          line,
+          tradeId: trade.id,
+          kind: 'tp',
+          price: trade.takeProfit,
+          trade,
+          draggable,
+          tag,
+        });
+      }
     });
-    priceLinesRef.current = next;
+
+    priceLinesRef.current = nextLines;
+    lineMetaRef.current = nextMeta;
   };
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     const el = containerRef.current;
-    // Lightweight Charts: solo hex (#RRGGBB / #RRGGBBAA)
     const chart = createChart(el, {
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
@@ -250,15 +405,242 @@ export function PriceChart({
     });
     ro.observe(el);
 
+    // ── Drag SL / TP ─────────────────────────────────────────────────────
+    const yToLocal = (clientY: number) => {
+      const rect = el.getBoundingClientRect();
+      return clientY - rect.top;
+    };
+
+    const findHit = (localY: number): LineMeta | null => {
+      const s = seriesRef.current;
+      if (!s) return null;
+      let best: LineMeta | null = null;
+      let bestDist = HIT_PX;
+      for (const m of lineMetaRef.current) {
+        if (!m.draggable || m.kind === 'entry') continue;
+        const y = s.priceToCoordinate(m.price);
+        if (y == null) continue;
+        const d = Math.abs(y - localY);
+        if (d <= bestDist) {
+          bestDist = d;
+          best = m;
+        }
+      }
+      return best;
+    };
+
+    const setChartInteraction = (enabled: boolean) => {
+      chart.applyOptions({
+        handleScroll: enabled,
+        handleScale: enabled,
+      });
+    };
+
+    const onPointerDown = (ev: PointerEvent) => {
+      if (!onLevelsCommitRef.current) return;
+      // Only primary button / touch
+      if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+      const localY = yToLocal(ev.clientY);
+      const hit = findHit(localY);
+      if (!hit || (hit.kind !== 'sl' && hit.kind !== 'tp')) return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+      try {
+        el.setPointerCapture(ev.pointerId);
+      } catch {
+        /* ignore */
+      }
+
+      const previous = {
+        stopLoss: hit.trade.stopLoss,
+        takeProfit: hit.trade.takeProfit,
+      };
+      dragRef.current = {
+        meta: hit,
+        startPrice: hit.price,
+        currentPrice: hit.price,
+        previous,
+      };
+      setChartInteraction(false);
+      setCursor('grabbing');
+      setDragPreview({
+        y: localY,
+        price: hit.price,
+        kind: hit.kind,
+      });
+      // Emphasize active line
+      try {
+        hit.line.applyOptions({
+          lineWidth: 3,
+          lineStyle: LineStyle.Solid,
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const onPointerMove = (ev: PointerEvent) => {
+      const s = seriesRef.current;
+      if (!s) return;
+      const localY = yToLocal(ev.clientY);
+      const drag = dragRef.current;
+
+      if (!drag) {
+        // Hover cursor over draggable lines
+        if (onLevelsCommitRef.current) {
+          const hit = findHit(localY);
+          setCursor(hit ? 'ns-resize' : 'default');
+        }
+        return;
+      }
+
+      const price = s.coordinateToPrice(localY);
+      if (price == null || !Number.isFinite(price) || price <= 0) return;
+
+      drag.currentPrice = price;
+      drag.meta.price = price;
+      try {
+        drag.meta.line.applyOptions({ price });
+      } catch {
+        /* ignore */
+      }
+      setDragPreview({
+        y: localY,
+        price,
+        kind: drag.meta.kind as 'sl' | 'tp',
+      });
+    };
+
+    const finishDrag = async (ev: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      dragRef.current = null;
+      setChartInteraction(true);
+      setCursor('default');
+      setDragPreview(null);
+
+      try {
+        el.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* ignore */
+      }
+
+      const kind = drag.meta.kind as 'sl' | 'tp';
+      const newPrice = drag.currentPrice;
+      const trade = drag.meta.trade;
+
+      // Restore line style from solid drag preview
+      try {
+        drag.meta.line.applyOptions({
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+          price: newPrice,
+        });
+      } catch {
+        /* ignore */
+      }
+
+      const check = validateLevel(trade, kind, newPrice, liveMidRef.current);
+      if (!check.ok) {
+        // Revert line
+        try {
+          drag.meta.line.applyOptions({ price: drag.startPrice });
+        } catch {
+          /* ignore */
+        }
+        drag.meta.price = drag.startPrice;
+        onLevelsInvalidRef.current?.(check.message);
+        return;
+      }
+
+      // No meaningful change
+      if (Math.abs(newPrice - drag.startPrice) < 1e-12) {
+        return;
+      }
+
+      const stopLoss = kind === 'sl' ? newPrice : trade.stopLoss;
+      const takeProfit =
+        kind === 'tp' ? newPrice : trade.takeProfit;
+
+      const commit = onLevelsCommitRef.current;
+      if (!commit) {
+        try {
+          drag.meta.line.applyOptions({ price: drag.startPrice });
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+
+      try {
+        await commit({
+          tradeId: trade.id,
+          stopLoss,
+          takeProfit,
+          previous: drag.previous,
+        });
+        // Parent will refresh trades → syncTradeLines
+      } catch {
+        // Revert on failure
+        try {
+          drag.meta.line.applyOptions({ price: drag.startPrice });
+        } catch {
+          /* ignore */
+        }
+        drag.meta.price = drag.startPrice;
+      }
+    };
+
+    const onPointerUp = (ev: PointerEvent) => {
+      if (dragRef.current) void finishDrag(ev);
+    };
+
+    const onPointerCancel = (ev: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      try {
+        drag.meta.line.applyOptions({
+          price: drag.startPrice,
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+        });
+      } catch {
+        /* ignore */
+      }
+      drag.meta.price = drag.startPrice;
+      dragRef.current = null;
+      setChartInteraction(true);
+      setCursor('default');
+      setDragPreview(null);
+      try {
+        el.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* ignore */
+      }
+    };
+
+    el.addEventListener('pointerdown', onPointerDown);
+    el.addEventListener('pointermove', onPointerMove);
+    el.addEventListener('pointerup', onPointerUp);
+    el.addEventListener('pointercancel', onPointerCancel);
+    el.addEventListener('lostpointercapture', onPointerCancel);
+
     return () => {
+      el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('pointermove', onPointerMove);
+      el.removeEventListener('pointerup', onPointerUp);
+      el.removeEventListener('pointercancel', onPointerCancel);
+      el.removeEventListener('lostpointercapture', onPointerCancel);
       ro.disconnect();
       priceLinesRef.current = [];
+      lineMetaRef.current = [];
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
       lastBarRef.current = null;
     };
-    // Chart se monta una sola vez; sync de trades va en otro effect
+    // Chart mounts once; trade sync is a separate effect
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -287,7 +669,6 @@ export function PriceChart({
           }
         }
         chartRef.current?.timeScale().fitContent();
-        // Re-aplicar líneas tras setData (cambio de asset/tf)
         syncTradeLines();
       })
       .catch(() => {});
@@ -298,7 +679,6 @@ export function PriceChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset, timeframe]);
 
-  // Tiempo real: open / close / expire / update de SL-TP
   useEffect(() => {
     syncTradeLines();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -371,7 +751,13 @@ export function PriceChart({
   }, [asset]);
 
   return (
-    <div className={className ?? 'relative h-full w-full min-h-[280px]'}>
+    <div
+      className={cn(
+        className ?? 'relative h-full w-full min-h-[280px]',
+        cursor === 'ns-resize' && 'cursor-ns-resize',
+        cursor === 'grabbing' && 'cursor-grabbing',
+      )}
+    >
       <div className="pointer-events-none absolute left-3 top-2 z-10 flex items-center gap-2">
         <span className="rounded bg-black/40 px-2 py-0.5 font-mono text-xs font-semibold text-foreground backdrop-blur-sm">
           {asset}
@@ -382,14 +768,31 @@ export function PriceChart({
         >
           —
         </span>
+        {onLevelsCommit && (
+          <span className="hidden rounded bg-black/30 px-1.5 py-0.5 text-[9px] text-muted-foreground backdrop-blur-sm sm:inline">
+            Drag SL / TP
+          </span>
+        )}
       </div>
-      <div ref={containerRef} className="h-full w-full min-h-[280px]" />
+
+      {dragPreview && (
+        <div
+          className={cn(
+            'pointer-events-none absolute right-14 z-20 -translate-y-1/2 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold shadow-sm backdrop-blur-sm',
+            dragPreview.kind === 'sl'
+              ? 'border-destructive/40 bg-destructive/20 text-destructive'
+              : 'border-success/40 bg-success/20 text-success',
+          )}
+          style={{ top: dragPreview.y }}
+        >
+          {dragPreview.kind === 'sl' ? 'SL' : 'TP'} {formatPx(dragPreview.price)}
+        </div>
+      )}
+
+      <div
+        ref={containerRef}
+        className="h-full w-full min-h-[280px] touch-none"
+      />
     </div>
   );
-}
-
-function formatPx(n: number): string {
-  if (n >= 1000) return n.toFixed(2);
-  if (n >= 10) return n.toFixed(3);
-  return n.toFixed(5);
 }

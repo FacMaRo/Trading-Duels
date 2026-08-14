@@ -568,8 +568,69 @@ export default function BrArenaPage() {
           stopLoss: t.stopLoss,
           takeProfit: t.takeProfit,
           label: COPY.arena.me,
+          draggable: isLive,
         })),
-    [trades],
+    [trades, isLive],
+  );
+
+  const handleChartLevelsCommit = useCallback(
+    async (args: {
+      tradeId: string;
+      stopLoss: number;
+      takeProfit: number | null;
+      previous: { stopLoss: number; takeProfit: number | null };
+    }) => {
+      const { tradeId, stopLoss, takeProfit, previous } = args;
+      // Optimistic update so live PnL uses new SL immediately
+      setTrades((prev) =>
+        prev.map((t) =>
+          t.id === tradeId ? { ...t, stopLoss, takeProfit } : t,
+        ),
+      );
+      if (editingId === tradeId) {
+        setEditSl(String(stopLoss));
+        setEditTp(takeProfit != null ? String(takeProfit) : '');
+      }
+      try {
+        const updated = await brApi.updateTradeLevels(id, tradeId, {
+          stopLoss,
+          takeProfit,
+        });
+        setTrades((prev) => {
+          const i = prev.findIndex((x) => x.id === updated.id);
+          if (i < 0) return [...prev, updated];
+          const n = [...prev];
+          n[i] = updated;
+          return n;
+        });
+        pushToast(COPY.arena.levelsSaved, 'info');
+        pulseTrade(tradeId);
+      } catch (err) {
+        setTrades((prev) =>
+          prev.map((t) =>
+            t.id === tradeId
+              ? {
+                  ...t,
+                  stopLoss: previous.stopLoss,
+                  takeProfit: previous.takeProfit,
+                }
+              : t,
+          ),
+        );
+        if (editingId === tradeId) {
+          setEditSl(String(previous.stopLoss));
+          setEditTp(
+            previous.takeProfit != null ? String(previous.takeProfit) : '',
+          );
+        }
+        pushToast(
+          err instanceof Error ? err.message : COPY.arena.levelsSaveFailed,
+          'danger',
+        );
+        throw err; // chart reverts line
+      }
+    },
+    [id, editingId, pushToast, pulseTrade],
   );
 
   function showFormError(msg: string) {
@@ -1035,7 +1096,14 @@ export default function BrArenaPage() {
                 asset={match.asset}
                 timeframe={tf}
                 trades={chartTrades}
+                liveMid={liveMid}
                 className="h-full w-full"
+                onLevelsCommit={
+                  isLive ? handleChartLevelsCommit : undefined
+                }
+                onLevelsInvalid={(msg) =>
+                  pushToast(msg || COPY.arena.levelsDragInvalid, 'danger')
+                }
               />
             </div>
           </section>
