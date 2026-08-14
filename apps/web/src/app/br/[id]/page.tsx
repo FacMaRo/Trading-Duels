@@ -85,10 +85,20 @@ export default function BrArenaPage() {
   const tradesRef = useRef<BrTradeDto[]>([]);
   tradesRef.current = trades;
 
-  const pushToast = useCallback((message: string, tone?: ToastItem['tone']) => {
-    const tid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    setToasts((prev) => [...prev.slice(-4), { id: tid, message, tone }]);
-  }, []);
+  const pushToast = useCallback(
+    (
+      message: string,
+      tone?: ToastItem['tone'],
+      durationMs?: number,
+    ) => {
+      const tid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      // Max 3 visible — drop oldest
+      setToasts((prev) =>
+        [...prev, { id: tid, message, tone, durationMs }].slice(-3),
+      );
+    },
+    [],
+  );
 
   const pulseTrade = useCallback((tradeId: string) => {
     setPulseIds((prev) => new Set(prev).add(tradeId));
@@ -379,7 +389,8 @@ export default function BrArenaPage() {
             : improved
               ? 'info'
               : 'danger';
-      pushToast(msg, tone);
+      // Rank/prize slightly longer (capped at 4s in ToastCard)
+      pushToast(msg, tone, zoneChanged ? 4000 : 3200);
       if (improved || zone === 'PRIZE' || zone === 'REFUND') {
         if (zoneChanged && improved) arenaSfx.zoneUp();
         else if (zoneChanged && !improved) arenaSfx.zoneDown();
@@ -1723,6 +1734,8 @@ export default function BrArenaPage() {
 
       <ToastStack
         toasts={toasts}
+        position="top-right"
+        maxVisible={3}
         onDismiss={(tid) =>
           setToasts((prev) => prev.filter((x) => x.id !== tid))
         }
