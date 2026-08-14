@@ -34,9 +34,13 @@ import {
   BR_STAKES,
   BR_VIRTUAL_CAPITAL,
   brEffectiveStake,
+  brFreezeOpenRisk,
   brPlatformFee,
   brPot,
   brPrizePool,
+  brRemainingRiskAmount,
+  brRiskPctFromAmount,
+  brValidateSlRiskChange,
   checkSlTpHit,
   daysUntilNextUtcWeek,
   exitPriceForClose,
@@ -49,7 +53,7 @@ import {
   nextUtcWeekStart,
   payoutForRank,
   rankBrPlayers,
-  scoreClosedTrade,
+  scoreBrTradeFixedSize,
   shouldActivateLimit,
   utcIsoWeekKey,
   validateBrTradeOpen,
@@ -963,8 +967,22 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('Order type must be MARKET or LIMIT');
     }
 
-    const riskAmount =
-      (BR_VIRTUAL_CAPITAL * input.riskPct) / 100;
+    // Freeze size + original risk at open (1R $ never resets when SL moves later)
+    if (entryPrice == null || !(entryPrice > 0)) {
+      throw new BadRequestException('Entry price required to size position');
+    }
+    const frozen = brFreezeOpenRisk({
+      side: input.side,
+      entryPrice,
+      stopLoss: input.stopLoss,
+      riskPct: input.riskPct,
+      capital: BR_VIRTUAL_CAPITAL,
+    });
+    if (!(frozen.positionSize > 0)) {
+      throw new BadRequestException(
+        'Stop loss is too close to entry to size a position',
+      );
+    }
 
     const trade = await this.prisma.brTrade.create({
       data: {
@@ -979,7 +997,10 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
         stopLoss: input.stopLoss,
         takeProfit: input.takeProfit ?? null,
         riskPct: input.riskPct,
-        riskAmount,
+        riskAmount: frozen.originalRiskAmount,
+        originalStopLoss: frozen.originalStopLoss,
+        positionSize: frozen.positionSize,
+        reservedRiskAmount: frozen.reservedRiskAmount,
         openedAt,
       },
     });
@@ -1049,12 +1070,43 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     if (trade.status !== TradeStatus.PENDING) {
       throw new BadRequestException('Only pending limits can be cancelled');
     }
+    const reserved = toNumber(trade.reservedRiskAmount) || toNumber(trade.riskAmount);
+    const releasePct = brRiskPctFromAmount(reserved, BR_VIRTUAL_CAPITAL);
+
     const updated = await this.prisma.brTrade.update({
       where: { id: tradeId },
-      data: { status: TradeStatus.CANCELLED, closedAt: new Date() },
+      data: {
+        status: TradeStatus.CANCELLED,
+        closedAt: new Date(),
+        reservedRiskAmount: 0,
+      },
     });
+
+    // Return reserved risk to match budget
+    if (releasePct > 0) {
+      await this.prisma.brMatchPlayer.update({
+        where: { id: trade.playerId },
+        data: {
+          totalRiskUsedPct: {
+            decrement: releasePct,
+          },
+        },
+      });
+      // Clamp floor at 0
+      const seat = await this.prisma.brMatchPlayer.findUnique({
+        where: { id: trade.playerId },
+      });
+      if (seat && toNumber(seat.totalRiskUsedPct) < 0) {
+        await this.prisma.brMatchPlayer.update({
+          where: { id: trade.playerId },
+          data: { totalRiskUsedPct: 0 },
+        });
+      }
+    }
+
     const result = this.toTradeDto(updated);
     this.emit(matchId, 'br:trade_update', result);
+    this.broadcastMatch(matchId);
     return result;
   }
 
@@ -1152,18 +1204,103 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // Fixed-size risk budget: widen needs free risk; tighten releases
+    const originalRiskAmount = toNumber(trade.riskAmount);
+    const originalStopLoss =
+      toNumber(trade.originalStopLoss) > 0
+        ? toNumber(trade.originalStopLoss)
+        : toNumber(trade.stopLoss);
+    const currentReserved =
+      toNumber(trade.reservedRiskAmount) > 0
+        ? toNumber(trade.reservedRiskAmount)
+        : originalRiskAmount;
+
+    const player = await this.prisma.brMatchPlayer.findUniqueOrThrow({
+      where: { id: trade.playerId },
+    });
+    // Free budget = remaining besides this trade's current reserved
+    const usedPct = toNumber(player.totalRiskUsedPct);
+    const usedExcludingThis = Math.max(
+      0,
+      usedPct - brRiskPctFromAmount(currentReserved, BR_VIRTUAL_CAPITAL),
+    );
+    const freeRiskBudget = brRemainingRiskAmount({
+      totalRiskUsedPct: usedExcludingThis,
+      maxRiskPct: BR_MAX_RISK_PCT,
+      capital: BR_VIRTUAL_CAPITAL,
+    });
+
+    const riskCheck = brValidateSlRiskChange({
+      side,
+      entryPrice: ref,
+      originalStopLoss,
+      originalRiskAmount,
+      currentReserved,
+      newStopLoss: input.stopLoss,
+      freeRiskBudget,
+    });
+    if (!riskCheck.ok) {
+      throw new BadRequestException(riskCheck.message);
+    }
+
+    const deltaPct = brRiskPctFromAmount(
+      riskCheck.deltaReserved,
+      BR_VIRTUAL_CAPITAL,
+    );
+
     const updated = await this.prisma.brTrade.update({
       where: { id: tradeId },
       data: {
         stopLoss: input.stopLoss,
         takeProfit: tp,
+        reservedRiskAmount: riskCheck.newReserved,
+        // Backfill freeze fields if legacy row
+        originalStopLoss:
+          toNumber(trade.originalStopLoss) > 0
+            ? undefined
+            : originalStopLoss,
+        positionSize:
+          toNumber(trade.positionSize) > 0
+            ? undefined
+            : originalRiskAmount /
+              Math.max(
+                1e-12,
+                Math.abs(ref - originalStopLoss),
+              ),
       },
     });
+
+    if (Math.abs(deltaPct) > 1e-9) {
+      await this.prisma.brMatchPlayer.update({
+        where: { id: trade.playerId },
+        data: {
+          totalRiskUsedPct: { increment: deltaPct },
+        },
+      });
+      const seat = await this.prisma.brMatchPlayer.findUnique({
+        where: { id: trade.playerId },
+      });
+      if (seat && toNumber(seat.totalRiskUsedPct) < 0) {
+        await this.prisma.brMatchPlayer.update({
+          where: { id: trade.playerId },
+          data: { totalRiskUsedPct: 0 },
+        });
+      }
+    }
 
     const result = this.toTradeDto(updated);
     this.emit(matchId, 'br:trade_update', result);
     this.broadcastMatch(matchId);
-    return result;
+    return {
+      ...result,
+      riskMessage: riskCheck.widened
+        ? 'SL widened — extra risk reserved'
+        : riskCheck.tightened
+          ? 'SL tightened'
+          : null,
+      reservedRiskAmount: riskCheck.newReserved,
+      riskDelta: riskCheck.deltaReserved,
+    };
   }
 
   // ─── Tick / lifecycle ────────────────────────────────────────────────────
@@ -1451,12 +1588,29 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
             tick,
           );
 
-    const score = scoreClosedTrade({
+    const entry = toNumber(trade.entryPrice);
+    const originalRiskAmount = toNumber(trade.riskAmount);
+    const originalStopLoss =
+      toNumber(trade.originalStopLoss) > 0
+        ? toNumber(trade.originalStopLoss)
+        : toNumber(trade.stopLoss);
+    let positionSize = toNumber(trade.positionSize);
+    if (!(positionSize > 0) && entry > 0) {
+      const d = Math.abs(entry - originalStopLoss);
+      positionSize = d > 0 ? originalRiskAmount / d : 0;
+    }
+    const reserved =
+      toNumber(trade.reservedRiskAmount) > 0
+        ? toNumber(trade.reservedRiskAmount)
+        : originalRiskAmount;
+
+    // Fixed size × price move (1R $ = originalRiskAmount; SL distance does not reset R base)
+    const score = scoreBrTradeFixedSize({
       side: trade.side as 'LONG' | 'SHORT',
-      entryPrice: toNumber(trade.entryPrice),
+      entryPrice: entry,
       exitPrice: exit,
-      stopLoss: toNumber(trade.stopLoss),
-      riskAmount: toNumber(trade.riskAmount),
+      positionSize,
+      originalRiskAmount,
     });
 
     const updated = await this.prisma.brTrade.update({
@@ -1471,7 +1625,15 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
-    // Update player totals
+    // Update player totals + risk budget after close
+    // Stop-out / loss consumes min(reserved, actualLoss); profit releases full reserved.
+    const actualLoss = Math.max(0, -score.pnl);
+    const release$ = Math.max(0, reserved - actualLoss);
+    const extraConsume$ = Math.max(0, actualLoss - reserved);
+    const riskPctAdjust =
+      -brRiskPctFromAmount(release$, BR_VIRTUAL_CAPITAL) +
+      brRiskPctFromAmount(extraConsume$, BR_VIRTUAL_CAPITAL);
+
     const player = await this.prisma.brMatchPlayer.findUnique({
       where: { id: trade.playerId },
     });
@@ -1481,8 +1643,20 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
         data: {
           totalPnl: toNumber(player.totalPnl) + score.pnl,
           openTrades: Math.max(0, player.openTrades - 1),
+          ...(Math.abs(riskPctAdjust) > 1e-9
+            ? { totalRiskUsedPct: { increment: riskPctAdjust } }
+            : {}),
         },
       });
+      const seat = await this.prisma.brMatchPlayer.findUnique({
+        where: { id: player.id },
+      });
+      if (seat && toNumber(seat.totalRiskUsedPct) < 0) {
+        await this.prisma.brMatchPlayer.update({
+          where: { id: player.id },
+          data: { totalRiskUsedPct: 0 },
+        });
+      }
     }
 
     const result = this.toTradeDto(updated);
@@ -2379,6 +2553,9 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     takeProfit: { toNumber?: () => number } | number | null;
     riskPct: { toNumber?: () => number } | number;
     riskAmount: { toNumber?: () => number } | number;
+    originalStopLoss?: { toNumber?: () => number } | number | null;
+    positionSize?: { toNumber?: () => number } | number | null;
+    reservedRiskAmount?: { toNumber?: () => number } | number | null;
     rMultiple: { toNumber?: () => number } | number | null;
     pnl: { toNumber?: () => number } | number | null;
     closeReason?: string | null;
@@ -2393,6 +2570,19 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
       }
       return Number(v);
     };
+    const riskAmount = num(t.riskAmount) ?? 0;
+    const stopLoss = num(t.stopLoss) ?? 0;
+    const entry = num(t.entryPrice);
+    let originalStopLoss = num(t.originalStopLoss) ?? 0;
+    if (!(originalStopLoss > 0)) originalStopLoss = stopLoss;
+    let positionSize = num(t.positionSize) ?? 0;
+    if (!(positionSize > 0) && entry != null && entry > 0 && originalStopLoss > 0) {
+      const d = Math.abs(entry - originalStopLoss);
+      positionSize = d > 0 ? riskAmount / d : 0;
+    }
+    let reservedRiskAmount = num(t.reservedRiskAmount) ?? 0;
+    if (!(reservedRiskAmount > 0)) reservedRiskAmount = riskAmount;
+
     return {
       id: t.id,
       matchId: t.matchId,
@@ -2401,12 +2591,16 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
       side: t.side,
       orderType: t.orderType,
       status: t.status,
-      entryPrice: num(t.entryPrice),
+      entryPrice: entry,
       exitPrice: num(t.exitPrice),
-      stopLoss: num(t.stopLoss) ?? 0,
+      stopLoss,
       takeProfit: num(t.takeProfit),
       riskPct: num(t.riskPct) ?? 0,
-      riskAmount: num(t.riskAmount) ?? 0,
+      /** Frozen original risk $ at open (1R reference) */
+      riskAmount,
+      originalStopLoss,
+      positionSize,
+      reservedRiskAmount,
       rMultiple: num(t.rMultiple),
       pnl: num(t.pnl),
       closeReason: t.closeReason ?? null,

@@ -310,12 +310,17 @@ export default function BrArenaPage() {
         entryPrice: t.entryPrice,
         stopLoss: t.stopLoss,
         riskAmount: t.riskAmount,
+        positionSize: t.positionSize,
+        originalStopLoss: t.originalStopLoss ?? t.stopLoss,
         mid: liveMid,
       });
       const r = unrealizedTradeR({
         side: t.side,
         entryPrice: t.entryPrice,
         stopLoss: t.stopLoss,
+        riskAmount: t.riskAmount,
+        positionSize: t.positionSize,
+        originalStopLoss: t.originalStopLoss ?? t.stopLoss,
         mid: liveMid,
       });
       map.set(t.id, { pnl, r });
@@ -581,7 +586,7 @@ export default function BrArenaPage() {
       previous: { stopLoss: number; takeProfit: number | null };
     }) => {
       const { tradeId, stopLoss, takeProfit, previous } = args;
-      // Optimistic update so live PnL uses new SL immediately
+      // Optimistic stop/tp only — size & original risk stay fixed
       setTrades((prev) =>
         prev.map((t) =>
           t.id === tradeId ? { ...t, stopLoss, takeProfit } : t,
@@ -603,7 +608,21 @@ export default function BrArenaPage() {
           n[i] = updated;
           return n;
         });
-        pushToast(COPY.arena.levelsSaved, 'info');
+        // Refresh seat risk budget
+        void load();
+        const msg =
+          updated.riskMessage ||
+          (stopLoss !== previous.stopLoss
+            ? COPY.arena.levelsSaved
+            : COPY.arena.levelsSaved);
+        pushToast(
+          msg,
+          updated.riskMessage?.includes('widened')
+            ? 'info'
+            : updated.riskMessage?.includes('tightened')
+              ? 'success'
+              : 'info',
+        );
         pulseTrade(tradeId);
       } catch (err) {
         setTrades((prev) =>
@@ -623,14 +642,16 @@ export default function BrArenaPage() {
             previous.takeProfit != null ? String(previous.takeProfit) : '',
           );
         }
+        const em =
+          err instanceof Error ? err.message : COPY.arena.levelsSaveFailed;
         pushToast(
-          err instanceof Error ? err.message : COPY.arena.levelsSaveFailed,
+          em.includes('risk') ? em : em || COPY.arena.slWidenDenied,
           'danger',
         );
         throw err; // chart reverts line
       }
     },
-    [id, editingId, pushToast, pulseTrade],
+    [id, editingId, pushToast, pulseTrade, load],
   );
 
   function showFormError(msg: string) {
@@ -901,10 +922,18 @@ export default function BrArenaPage() {
         return n;
       });
       setEditingId(null);
-      pushToast(COPY.arena.levelsSaved, 'info');
+      void load();
+      pushToast(
+        updated.riskMessage || COPY.arena.levelsSaved,
+        updated.riskMessage?.includes('Not enough') ? 'danger' : 'info',
+      );
       pulseTrade(t.id);
     } catch (err) {
       setEditError(err instanceof Error ? err.message : COPY.common.error);
+      pushToast(
+        err instanceof Error ? err.message : COPY.arena.levelsSaveFailed,
+        'danger',
+      );
     } finally {
       setEditBusy(false);
     }
@@ -1694,8 +1723,23 @@ export default function BrArenaPage() {
                 )}
               </Button>
               <p className="mt-1 text-[9px] leading-snug text-muted-foreground">
+                {(() => {
+                  const maxPct = match.myStats?.maxRiskPct ?? 2;
+                  const used = match.myStats?.totalRiskUsedPct ?? 0;
+                  const leftPct = Math.max(0, maxPct - used);
+                  const capital = match.myStats?.virtualCapital ?? 10000;
+                  const leftUsd = (leftPct / 100) * capital;
+                  return COPY.arena.riskLeft(
+                    leftPct.toFixed(2),
+                    formatUsd(leftUsd),
+                  );
+                })()}
+              </p>
+              <p className="mt-0.5 text-[9px] leading-snug text-muted-foreground/80">
                 {COPY.arena.riskUsed(
-                  String(match.myStats?.totalRiskUsedPct.toFixed(1) ?? 0),
+                  String(
+                    (match.myStats?.totalRiskUsedPct ?? 0).toFixed(1),
+                  ),
                   formatUsd(match.myStats?.virtualCapital ?? 10000),
                 )}
               </p>

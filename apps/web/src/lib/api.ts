@@ -378,12 +378,20 @@ export interface BrTradeDto {
   stopLoss: number;
   takeProfit: number | null;
   riskPct: number;
+  /** Frozen original risk $ at open (1R $ reference) */
   riskAmount: number;
+  originalStopLoss?: number;
+  /** Fixed position size for life of trade */
+  positionSize?: number;
+  /** Current $ reserved on match risk budget */
+  reservedRiskAmount?: number;
   rMultiple: number | null;
   pnl: number | null;
   closeReason?: string | null;
   openedAt: string | null;
   closedAt: string | null;
+  /** Present on updateTradeLevels response */
+  riskMessage?: string | null;
 }
 
 export type BrPrizeZone = 'PRIZE' | 'REFUND' | 'OUT';

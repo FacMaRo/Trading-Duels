@@ -7,4 +7,5 @@ export * from './ranks';
 export * from './missions';
 export * from './spectator';
 export * from './battle-royale';
+export * from './br-risk';
 export * from './referral';

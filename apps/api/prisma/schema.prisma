@@ -677,8 +677,16 @@ model BrTrade {
   exitPrice    Decimal?    @db.Decimal(18, 8)
   stopLoss     Decimal     @db.Decimal(18, 8)
   takeProfit   Decimal?    @db.Decimal(18, 8)
+  /// Risk % of capital requested at open (budget charge at open)
   riskPct      Decimal     @db.Decimal(8, 4)
+  /// Frozen original risk $ at open (= 1R $ reference; never resets with SL edit)
   riskAmount   Decimal     @db.Decimal(18, 2)
+  /// SL at open/fill — distance reference for size & widen/tighten math
+  originalStopLoss Decimal @default(0) @db.Decimal(18, 8)
+  /// Fixed position size for life of trade (units)
+  positionSize Decimal     @default(0) @db.Decimal(18, 8)
+  /// Current $ reserved against match risk budget (changes with SL distance)
+  reservedRiskAmount Decimal @default(0) @db.Decimal(18, 2)
   rMultiple    Decimal?    @db.Decimal(12, 4)
   pnl          Decimal?    @db.Decimal(18, 2)
   closeReason  String?
