@@ -37,6 +37,8 @@ export const COPY = {
     ctaDemoHint: 'Virtual $5 practice match · no card required',
     howItWorksLink: 'How it works',
     howTitle: 'How it works',
+    howSubtitle:
+      'Three steps from free practice to a full 10-minute match.',
     howSteps: [
       {
         title: 'Join a match',
@@ -48,12 +50,9 @@ export const COPY = {
       },
       {
         title: 'Top 5 win',
-        body: 'Ranked by profit $. Prize pool split among the top five (demo shows virtual prizes).',
+        body: 'Ranked by profit $. Top 5 share the prize pool (demo shows virtual prizes).',
       },
     ],
-    arenaTitle: 'See the arena',
-    arenaCaption:
-      'Live ranking, open PnL, drag SL/TP — same UI you get in the free demo.',
     rulesTitle: 'Rules at a glance',
     rules: [
       {
@@ -77,8 +76,9 @@ export const COPY = {
         hint: 'Ranked by profit $ — not random',
       },
     ],
-    prizeSplit: 'Top 5 prize split (of prize pool after fee)',
-    prizeShares: '40% · 24% · 16% · 12% · 8%',
+    prizeSplit:
+      'Top 5 split of the prize pool after the 10% platform fee',
+    prizeShares: '45% · 25% · 15% · 10% · 5%',
     finalCta: 'Play Free Demo',
     finalTrust: 'Free practice · no account · no deposit',
     realEyebrow: 'Ready for real stakes later?',
