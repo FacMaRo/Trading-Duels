@@ -59,6 +59,8 @@ import {
   utcIsoWeekKey,
   validateBrTradeOpen,
   validateMarketSlTp,
+  validateOpenTradeStopLoss,
+  validateOpenTradeTakeProfit,
   zoneForRank,
   type AssetSymbol,
   type BrPrizeStructure,
@@ -1173,19 +1175,16 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
     }
 
     const side = trade.side as 'LONG' | 'SHORT';
-    const ref =
+    const status = String(trade.status).toUpperCase();
+    const isOpen = status === 'OPEN';
+    const isPending = status === 'PENDING';
+    const entry =
       trade.entryPrice != null && toNumber(trade.entryPrice) > 0
         ? toNumber(trade.entryPrice)
         : null;
-    if (ref == null) {
-      throw new BadRequestException('Trade has no entry price to validate against');
-    }
-
-    if (!isStopLossValid(side, ref, input.stopLoss)) {
+    if (entry == null) {
       throw new BadRequestException(
-        side === 'LONG'
-          ? 'On LONG, stop loss must be below the entry price'
-          : 'On SHORT, stop loss must be above the entry price',
+        'Trade has no entry price to validate against',
       );
     }
 
@@ -1194,43 +1193,43 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
         ? null
         : input.takeProfit;
 
-    if (tp != null && !isTakeProfitValid(side, ref, tp)) {
-      throw new BadRequestException(
-        side === 'LONG'
-          ? 'On LONG, take profit must be above the entry price'
-          : 'On SHORT, take profit must be below the entry price',
-      );
-    }
+    // OPEN: SL vs CURRENT mid only — entry is NOT a barrier (break-even / profit lock).
+    // PENDING: SL vs planned entry (unchanged open-order rules).
+    const tick = this.market.getTick(match.asset as AssetSymbol);
+    const mid = tick?.mid != null && tick.mid > 0 ? tick.mid : null;
 
-    // If already open, also ensure SL/TP still make sense vs live mid (soft)
-    if (trade.status === TradeStatus.OPEN) {
-      const tick = this.market.getTick(match.asset as AssetSymbol);
-      const mid = tick?.mid;
-      if (mid != null && mid > 0) {
-        // Reject SL already on the wrong side of market (would instant-stop)
-        if (side === 'LONG' && input.stopLoss >= mid) {
-          throw new BadRequestException(
-            'Stop loss is at/above current price and would trigger immediately',
-          );
-        }
-        if (side === 'SHORT' && input.stopLoss <= mid) {
-          throw new BadRequestException(
-            'Stop loss is at/below current price and would trigger immediately',
-          );
-        }
-        if (tp != null) {
-          if (side === 'LONG' && tp <= mid) {
-            throw new BadRequestException(
-              'Take profit is at/below current price and would trigger immediately',
-            );
-          }
-          if (side === 'SHORT' && tp >= mid) {
-            throw new BadRequestException(
-              'Take profit is at/above current price and would trigger immediately',
-            );
-          }
-        }
+    if (isOpen) {
+      if (mid == null) {
+        throw new BadRequestException(
+          'No market price available to validate stop loss',
+        );
       }
+      const slOk = validateOpenTradeStopLoss(side, input.stopLoss, mid);
+      if (!slOk.ok) throw new BadRequestException(slOk.message);
+      if (tp != null) {
+        const tpOk = validateOpenTradeTakeProfit(side, tp, mid);
+        if (!tpOk.ok) throw new BadRequestException(tpOk.message);
+      }
+    } else if (isPending) {
+      // PENDING limit only — never use this branch for OPEN
+      if (!isStopLossValid(side, entry, input.stopLoss)) {
+        throw new BadRequestException(
+          side === 'LONG'
+            ? 'On LONG, stop loss must be below the entry price'
+            : 'On SHORT, stop loss must be above the entry price',
+        );
+      }
+      if (tp != null && !isTakeProfitValid(side, entry, tp)) {
+        throw new BadRequestException(
+          side === 'LONG'
+            ? 'On LONG, take profit must be above the entry price'
+            : 'On SHORT, take profit must be below the entry price',
+        );
+      }
+    } else {
+      throw new BadRequestException(
+        'Only open or pending trades can edit SL/TP',
+      );
     }
 
     // Fixed-size risk budget: widen needs free risk; tighten releases
@@ -1261,7 +1260,7 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
 
     const riskCheck = brValidateSlRiskChange({
       side,
-      entryPrice: ref,
+      entryPrice: entry,
       originalStopLoss,
       originalRiskAmount,
       currentReserved,
@@ -1294,7 +1293,7 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
             : originalRiskAmount /
               Math.max(
                 1e-12,
-                Math.abs(ref - originalStopLoss),
+                Math.abs(entry - originalStopLoss),
               ),
       },
     });
