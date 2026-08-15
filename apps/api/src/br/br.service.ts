@@ -1174,10 +1174,21 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('Stop loss is required');
     }
 
-    const side = trade.side as 'LONG' | 'SHORT';
-    const status = String(trade.status).toUpperCase();
-    const isOpen = status === 'OPEN';
-    const isPending = status === 'PENDING';
+    const side = (String(trade.side).toUpperCase() === 'SHORT'
+      ? 'SHORT'
+      : 'LONG') as 'LONG' | 'SHORT';
+    const statusRaw = String(trade.status ?? '');
+    const status = statusRaw.toUpperCase();
+    // Treat filled trades as OPEN even if status string is odd
+    const isOpen =
+      status === 'OPEN' ||
+      status === 'Open' ||
+      (trade.openedAt != null &&
+        status !== 'PENDING' &&
+        status !== 'CANCELLED' &&
+        status !== 'EXPIRED' &&
+        status !== 'CLOSED');
+    const isPending = status === 'PENDING' && !isOpen;
     const entry =
       trade.entryPrice != null && toNumber(trade.entryPrice) > 0
         ? toNumber(trade.entryPrice)
@@ -1193,13 +1204,25 @@ export class BrService implements OnModuleInit, OnModuleDestroy {
         ? null
         : input.takeProfit;
 
-    // OPEN: SL vs CURRENT mid only — entry is NOT a barrier (break-even / profit lock).
-    // PENDING: SL vs planned entry (unchanged open-order rules).
-    const tick = this.market.getTick(match.asset as AssetSymbol);
-    const mid = tick?.mid != null && tick.mid > 0 ? tick.mid : null;
+    // Resolve mid — retain asset and re-read if missing
+    this.market.retainAsset(match.asset);
+    let tick = this.market.getTick(match.asset as AssetSymbol);
+    let mid = tick?.mid != null && tick.mid > 0 ? tick.mid : null;
+    if (mid == null && tick?.bid != null && tick?.ask != null) {
+      mid = (tick.bid + tick.ask) / 2;
+    }
 
+    // Debug (demo / dev) — identify which validator ran
+    if (match.isDemo || process.env.NODE_ENV !== 'production') {
+      this.logger.log(
+        `[updateTradeLevels] status=${statusRaw} isOpen=${isOpen} isPending=${isPending} side=${side} entry=${entry} mid=${mid} requestedSl=${input.stopLoss} validator=${isOpen ? 'OPEN_MID' : isPending ? 'PENDING_ENTRY' : 'NONE'}`,
+      );
+    }
+
+    // OPEN: ONLY mid-based validator — never isStopLossValid(entry)
+    // Example: LONG entry=100 mid=105 SL=102 → ALLOW
     if (isOpen) {
-      if (mid == null) {
+      if (mid == null || !(mid > 0)) {
         throw new BadRequestException(
           'No market price available to validate stop loss',
         );
