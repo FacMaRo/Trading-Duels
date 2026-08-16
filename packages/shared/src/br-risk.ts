@@ -143,6 +143,85 @@ export function scoreBrTradeFixedSize(params: {
   };
 }
 
+/** Normalize side string from API / client */
+export function normalizeBrSide(side: string): BrSide {
+  return String(side).toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+}
+
+/**
+ * OPEN trade SL edit: direction vs current mid only.
+ * Entry is NOT a barrier — break-even / profit SL is allowed.
+ * Example: LONG entry 100, mid 105, SL 102 → OK.
+ */
+export function validateOpenTradeStopLoss(
+  side: BrSide | string,
+  stopLoss: number,
+  mid: number,
+): { ok: true } | { ok: false; message: string } {
+  const s = normalizeBrSide(String(side));
+  if (!(mid > 0) || !Number.isFinite(mid)) {
+    return {
+      ok: false,
+      message: 'No market price available to validate stop loss',
+    };
+  }
+  if (!(stopLoss > 0) || !Number.isFinite(stopLoss)) {
+    return { ok: false, message: 'Stop loss is required' };
+  }
+  // LONG: SL must be strictly below mid (may be above entry)
+  if (s === 'LONG') {
+    if (!(stopLoss < mid)) {
+      return {
+        ok: false,
+        message: 'Stop loss must be below current price for LONG',
+      };
+    }
+    return { ok: true };
+  }
+  // SHORT: SL must be strictly above mid (may be below entry)
+  if (!(stopLoss > mid)) {
+    return {
+      ok: false,
+      message: 'Stop loss must be above current price for SHORT',
+    };
+  }
+  return { ok: true };
+}
+
+/** OPEN trade TP edit: vs current mid only. */
+export function validateOpenTradeTakeProfit(
+  side: BrSide | string,
+  takeProfit: number,
+  mid: number,
+): { ok: true } | { ok: false; message: string } {
+  const s = normalizeBrSide(String(side));
+  if (!(mid > 0) || !Number.isFinite(mid)) {
+    return {
+      ok: false,
+      message: 'No market price available to validate take profit',
+    };
+  }
+  if (!(takeProfit > 0) || !Number.isFinite(takeProfit)) {
+    return { ok: false, message: 'Invalid take profit' };
+  }
+  if (s === 'LONG') {
+    if (!(takeProfit > mid)) {
+      return {
+        ok: false,
+        message: 'Take profit must be above current price for LONG',
+      };
+    }
+    return { ok: true };
+  }
+  if (!(takeProfit < mid)) {
+    return {
+      ok: false,
+      message: 'Take profit must be below current price for SHORT',
+    };
+  }
+  return { ok: true };
+}
+
 /**
  * Validate SL widen against remaining match budget.
  * remainingBudget must exclude this trade's current reserved (caller passes free budget).

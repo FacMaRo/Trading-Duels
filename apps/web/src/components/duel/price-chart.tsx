@@ -16,6 +16,8 @@ import { ensureDuelsSocketConnected } from '@/lib/socket';
 import {
   isStopLossValid,
   isTakeProfitValid,
+  validateOpenTradeStopLoss,
+  validateOpenTradeTakeProfit,
 } from '@trading-duels/shared';
 import { cn } from '@/lib/utils';
 
@@ -140,21 +142,53 @@ function formatPx(n: number): string {
   return n.toFixed(5);
 }
 
+/**
+ * Edit SL/TP validation.
+ * OPEN: mid only — entry is never a barrier (profit lock OK).
+ * PENDING: planned entry only.
+ * Never returns "entry" errors for OPEN trades.
+ */
 function validateLevel(
   trade: ChartTradeLevels,
   kind: 'sl' | 'tp',
   price: number,
   liveMid?: number | null,
+  lastClose?: number | null,
 ): { ok: true } | { ok: false; message: string } {
-  const side = trade.side === 'SHORT' ? 'SHORT' : 'LONG';
+  const side = String(trade.side).toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const status = String(trade.status ?? '').toUpperCase();
+  const isPending = status === 'PENDING';
+  // Any non-pending active trade is treated as OPEN for SL edit (profit lock)
+  const isOpen = !isPending;
   const entry = trade.entryPrice;
-  if (entry == null || !(entry > 0)) {
-    return { ok: false, message: 'Trade has no entry price' };
-  }
   if (!(price > 0) || !Number.isFinite(price)) {
     return { ok: false, message: 'Invalid price' };
   }
 
+  if (isOpen) {
+    const mid =
+      liveMid != null && liveMid > 0
+        ? liveMid
+        : lastClose != null && lastClose > 0
+          ? lastClose
+          : null;
+    if (mid == null) {
+      return {
+        ok: false,
+        message: 'No market price available to validate levels',
+      };
+    }
+    // ONLY mid-based helpers — never isStopLossValid(entry)
+    if (kind === 'sl') {
+      return validateOpenTradeStopLoss(side, price, mid);
+    }
+    return validateOpenTradeTakeProfit(side, price, mid);
+  }
+
+  // PENDING only: vs entry
+  if (entry == null || !(entry > 0)) {
+    return { ok: false, message: 'Trade has no entry price' };
+  }
   if (kind === 'sl') {
     if (!isStopLossValid(side, entry, price)) {
       return {
@@ -165,48 +199,14 @@ function validateLevel(
             : 'On SHORT, stop loss must be above the entry price',
       };
     }
-    if (trade.status === 'OPEN' && liveMid != null && liveMid > 0) {
-      if (side === 'LONG' && price >= liveMid) {
-        return {
-          ok: false,
-          message:
-            'Stop loss is at/above current price and would trigger immediately',
-        };
-      }
-      if (side === 'SHORT' && price <= liveMid) {
-        return {
-          ok: false,
-          message:
-            'Stop loss is at/below current price and would trigger immediately',
-        };
-      }
-    }
-  } else {
-    if (!isTakeProfitValid(side, entry, price)) {
-      return {
-        ok: false,
-        message:
-          side === 'LONG'
-            ? 'On LONG, take profit must be above the entry price'
-            : 'On SHORT, take profit must be below the entry price',
-      };
-    }
-    if (trade.status === 'OPEN' && liveMid != null && liveMid > 0) {
-      if (side === 'LONG' && price <= liveMid) {
-        return {
-          ok: false,
-          message:
-            'Take profit is at/below current price and would trigger immediately',
-        };
-      }
-      if (side === 'SHORT' && price >= liveMid) {
-        return {
-          ok: false,
-          message:
-            'Take profit is at/above current price and would trigger immediately',
-        };
-      }
-    }
+  } else if (!isTakeProfitValid(side, entry, price)) {
+    return {
+      ok: false,
+      message:
+        side === 'LONG'
+          ? 'On LONG, take profit must be above the entry price'
+          : 'On SHORT, take profit must be below the entry price',
+    };
   }
   return { ok: true };
 }
@@ -541,7 +541,18 @@ export function PriceChart({
         /* ignore */
       }
 
-      const check = validateLevel(trade, kind, newPrice, liveMidRef.current);
+      const midFallback =
+        liveMidRef.current ??
+        (lastBarRef.current?.close != null && lastBarRef.current.close > 0
+          ? lastBarRef.current.close
+          : null);
+      const check = validateLevel(
+        trade,
+        kind,
+        newPrice,
+        midFallback,
+        lastBarRef.current?.close ?? null,
+      );
       if (!check.ok) {
         // Revert line
         try {

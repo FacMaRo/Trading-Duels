@@ -122,28 +122,36 @@ export function parsePrice(raw: string): number | null {
 }
 
 /**
- * Validate SL direction vs a reference price (entry or mid).
+ * Validate SL direction vs a reference price.
+ * OPEN trade edits pass **current mid** (entry is not a barrier — break-even / profit SL allowed).
+ * New orders / PENDING pass **entry**.
  * LONG → SL < ref · SHORT → SL > ref
  */
 export function validateStopLossSide(
   side: 'LONG' | 'SHORT',
   stopLoss: number,
   referencePrice: number,
+  opts?: { vsCurrentPrice?: boolean },
 ): { ok: true } | { ok: false; message: string } {
   if (!(referencePrice > 0) || !(stopLoss > 0)) {
     return { ok: false, message: 'Invalid reference price or stop loss' };
   }
+  const vsMid = !!opts?.vsCurrentPrice;
   if (side === 'LONG') {
     if (!(stopLoss < referencePrice)) {
       return {
         ok: false,
-        message: `On LONG, stop loss must be below price (${formatPriceHint(referencePrice)})`,
+        message: vsMid
+          ? 'Stop loss must be below current price for LONG'
+          : `On LONG, stop loss must be below price (${formatPriceHint(referencePrice)})`,
       };
     }
   } else if (!(stopLoss > referencePrice)) {
     return {
       ok: false,
-      message: `On SHORT, stop loss must be above price (${formatPriceHint(referencePrice)})`,
+      message: vsMid
+        ? 'Stop loss must be above current price for SHORT'
+        : `On SHORT, stop loss must be above price (${formatPriceHint(referencePrice)})`,
     };
   }
   return { ok: true };
@@ -153,21 +161,27 @@ export function validateTakeProfitSide(
   side: 'LONG' | 'SHORT',
   takeProfit: number,
   referencePrice: number,
+  opts?: { vsCurrentPrice?: boolean },
 ): { ok: true } | { ok: false; message: string } {
   if (!(referencePrice > 0) || !(takeProfit > 0)) {
     return { ok: false, message: 'Invalid reference price or take profit' };
   }
+  const vsMid = !!opts?.vsCurrentPrice;
   if (side === 'LONG') {
     if (!(takeProfit > referencePrice)) {
       return {
         ok: false,
-        message: `On LONG, take profit must be above price (${formatPriceHint(referencePrice)})`,
+        message: vsMid
+          ? 'Take profit must be above current price for LONG'
+          : `On LONG, take profit must be above price (${formatPriceHint(referencePrice)})`,
       };
     }
   } else if (!(takeProfit < referencePrice)) {
     return {
       ok: false,
-      message: `On SHORT, take profit must be below price (${formatPriceHint(referencePrice)})`,
+      message: vsMid
+        ? 'Take profit must be below current price for SHORT'
+        : `On SHORT, take profit must be below price (${formatPriceHint(referencePrice)})`,
     };
   }
   return { ok: true };

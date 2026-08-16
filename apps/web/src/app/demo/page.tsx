@@ -423,6 +423,30 @@ export default function DemoPage() {
             <X className="h-4 w-4" />
             {COPY.demo.cancel}
           </Button>
+
+          {/* Soft feedback CTA — demo queue only, does not cover counter/cancel */}
+          <div className="mt-4 rounded-md border border-border bg-secondary/20 px-3 py-3 text-center">
+            <p className="text-xs font-semibold text-foreground">
+              {COPY.demo.feedbackTitle}
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              {COPY.demo.feedbackBody}
+            </p>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="mt-2.5 h-8 text-xs font-medium"
+              asChild
+            >
+              <a
+                href="https://forms.gle/thrZdfpyVDC2nBTQ8"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {COPY.demo.feedbackCta}
+              </a>
+            </Button>
+          </div>
         </section>
       )}
 

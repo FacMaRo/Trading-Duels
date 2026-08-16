@@ -121,6 +121,10 @@ export const COPY = {
     wantReal: 'Want to play for real money later?',
     entering: 'Joining…',
     loading: 'Loading…',
+    feedbackTitle: 'Help us improve this demo',
+    feedbackBody:
+      'If you like it, answering 5 short questions takes about 2 minutes and helps a lot.',
+    feedbackCta: 'Leave feedback',
   },
 
   lobby: {
@@ -335,6 +339,9 @@ export const COPY = {
     anotherDemo: 'Play another demo',
     changeStake: 'Change stake',
     backLobby: 'Back to Lobby',
+    feedbackPrompt: 'Got 2 minutes? Your feedback helps us improve.',
+    feedbackComplete: 'Complete form',
+    feedbackNotNow: 'Not now',
     closeRanking: 'Close and view final ranking',
     close: 'Close',
   },

@@ -74,6 +74,8 @@ export function BrResultModal({
   const [selectedStake, setSelectedStake] = useState(stake > 0 ? stake : 5);
   const [showStakeEdit, setShowStakeEdit] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
+  /** Demo-only soft feedback CTA (dismissible) */
+  const [showFeedback, setShowFeedback] = useState(true);
 
   const zone: BrPrizeZone =
     zoneProp ??
@@ -94,6 +96,7 @@ export function BrResultModal({
       setSelectedStake(stake > 0 ? stake : 5);
       setShowStakeEdit(false);
       setShowDetail(false);
+      setShowFeedback(true);
     }
   }, [open, stake]);
 
@@ -331,6 +334,40 @@ export function BrResultModal({
               <p className="font-semibold text-primary">
                 {COPY.result.wouldHavePaid(formatUsd(prize))}
               </p>
+            </div>
+          )}
+
+          {/* Demo-only feedback — does not block Play Again */}
+          {isDemo && showFeedback && (
+            <div className="mt-2 shrink-0 rounded-md border border-border bg-secondary/25 px-3 py-2.5 text-center">
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                {COPY.result.feedbackPrompt}
+              </p>
+              <div className="mt-2 flex flex-wrap items-center justify-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-8 text-xs font-medium"
+                  asChild
+                >
+                  <a
+                    href="https://forms.gle/thrZdfpyVDC2nBTQ8"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {COPY.result.feedbackComplete}
+                  </a>
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 text-xs text-muted-foreground"
+                  type="button"
+                  onClick={() => setShowFeedback(false)}
+                >
+                  {COPY.result.feedbackNotNow}
+                </Button>
+              </div>
             </div>
           )}
 

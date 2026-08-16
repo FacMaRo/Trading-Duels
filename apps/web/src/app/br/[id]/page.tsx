@@ -665,8 +665,12 @@ export default function BrArenaPage() {
             previous.takeProfit != null ? String(previous.takeProfit) : '',
           );
         }
-        const em =
+        let em =
           err instanceof Error ? err.message : COPY.arena.levelsSaveFailed;
+        // Never show entry-based messages for OPEN level edits (stale API copy)
+        if (/entry/i.test(em) && !/current price/i.test(em)) {
+          em = 'Stop loss must stay on the correct side of current price';
+        }
         pushToast(
           em.includes('risk') ? em : em || COPY.arena.slWidenDenied,
           'danger',
@@ -908,27 +912,67 @@ export default function BrArenaPage() {
         return;
       }
     }
-    const ref =
-      t.entryPrice != null && t.entryPrice > 0
-        ? t.entryPrice
-        : liveMid != null && liveMid > 0
-          ? liveMid
-          : null;
-    if (ref != null) {
-      const slCheck = validateStopLossSide(t.side as 'LONG' | 'SHORT', sl, ref);
-      if (!slCheck.ok) {
-        setEditError(slCheck.message);
+    // OPEN: mid only — never mention/validate entry (profit lock OK)
+    // PENDING: entry only
+    const status = String(t.status ?? '').toUpperCase();
+    const isPending = status === 'PENDING';
+    const isOpen = !isPending; // filled/OPEN → mid rules
+    const side = (String(t.side).toUpperCase() === 'SHORT'
+      ? 'SHORT'
+      : 'LONG') as 'LONG' | 'SHORT';
+
+    if (isOpen) {
+      let mid = liveMid != null && liveMid > 0 ? liveMid : null;
+      if (mid == null) {
+        try {
+          const tick = await marketApi.price(match?.asset ?? t.asset);
+          if (tick?.mid != null && tick.mid > 0) {
+            mid = tick.mid;
+            setLiveMid(tick.mid);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (mid == null || !(mid > 0)) {
+        setEditError('No market price available to validate stop loss');
+        return;
+      }
+      // LONG: SL < mid (may be above entry). SHORT: SL > mid (may be below entry).
+      if (side === 'LONG' && !(sl < mid)) {
+        setEditError('Stop loss must be below current price for LONG');
+        return;
+      }
+      if (side === 'SHORT' && !(sl > mid)) {
+        setEditError('Stop loss must be above current price for SHORT');
         return;
       }
       if (tp != null) {
-        const tpCheck = validateTakeProfitSide(
-          t.side as 'LONG' | 'SHORT',
-          tp,
-          ref,
-        );
-        if (!tpCheck.ok) {
-          setEditError(tpCheck.message);
+        if (side === 'LONG' && !(tp > mid)) {
+          setEditError('Take profit must be above current price for LONG');
           return;
+        }
+        if (side === 'SHORT' && !(tp < mid)) {
+          setEditError('Take profit must be below current price for SHORT');
+          return;
+        }
+      }
+    } else {
+      // PENDING only
+      const ref =
+        t.entryPrice != null && t.entryPrice > 0 ? t.entryPrice : null;
+      if (ref != null) {
+        const slCheck = validateStopLossSide(side, sl, ref);
+        if (!slCheck.ok) {
+          setEditError(slCheck.message);
+          return;
+        }
+        if (tp != null) {
+          const tpCheck = validateTakeProfitSide(side, tp, ref);
+          if (!tpCheck.ok) {
+            setEditError(tpCheck.message);
+            return;
+          }
         }
       }
     }
